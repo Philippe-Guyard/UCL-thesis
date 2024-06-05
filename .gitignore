@@ -1,3 +1,5 @@
 opt/__pycache__
 opt/data
+opt/random_data 
+opt/data_125m
 llama2/input.txt
