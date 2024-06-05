@@ -525,7 +525,7 @@ class OPTDecoderLayer(nn.Module):
         token_id = len(list(data_dir.iterdir())) # // 3
 
         if hidden_states.size(1) == 1:
-            assert past_key_value is not None  
+            # assert past_key_value is not None  
             torch.save(hidden_states, data_dir.joinpath(f'{token_id}.pt'))
             # torch.save(past_key_value[0], data_dir.joinpath(f'{token_id}_key.pt'))
             # torch.save(past_key_value[1], data_dir.joinpath(f'{token_id}_value.pt'))
