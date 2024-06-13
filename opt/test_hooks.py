@@ -19,19 +19,19 @@ add_hooks(model.model.decoder.layers, Path('./tmp'))
 total_params = sum(p.numel() for p in model.parameters())
 print(total_params // (10 ** 6))
 
-n_examples = 1
-mmlu: Dataset = load_dataset('cais/mmlu', name='all')
-data = mmlu['test'].select(range(n_examples))
+n_examples = 5
+wikitext = load_dataset('Salesforce/wikitext', 'wikitext-103-v1')
+data = wikitext['train'].select(range(n_examples))
 model.eval()
 
 with torch.no_grad():
     for idx, x in tqdm(enumerate(data), total=n_examples):
-        question: str = x['question'] 
+        question: str = x['text'] 
         input_ids = tokenizer(question, return_tensors='pt').input_ids.to(device) 
         n_inputs = input_ids.size(1)
 
         SampleIds.cur_sample_id = idx
-        num_tokens_to_generate = 1 
+        num_tokens_to_generate = 5 
         output = model.generate(input_ids, max_length=n_inputs + num_tokens_to_generate, 
                             do_sample=True, top_k=50, top_p=0.95, eos_token_id=tokenizer.eos_token_id) 
 Timer.print()

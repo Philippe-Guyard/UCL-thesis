@@ -1,3 +1,10 @@
 opt/__pycache__
 opt/data*
+
 my_nanogpt
+
+gemma/data 
+gemma/__pycache__
+
+lib_clean/__pycache__
+lib_clean/data

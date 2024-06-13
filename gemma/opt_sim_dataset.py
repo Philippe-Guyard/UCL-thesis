@@ -43,10 +43,11 @@ class TensorFile:
         )
 
 class ConsecutiveOutputsDataset(Dataset):
-    def __init__(self, data_root: Path, num_layers: int, num_samples: int, n: int):
+    def __init__(self, data_root: Path, num_layers: int, num_samples: int, n: int, dtype: torch.dtype=torch.float):
         self.data_root = data_root 
         self.num_layers = num_layers 
         self.num_samples = num_samples
+        self.dtype = dtype
 
         assert n >= 0
         self.n = n
@@ -97,7 +98,7 @@ class ConsecutiveOutputsDataset(Dataset):
         v1 = x.advance(1)
         v2 = x.advance(self.n + 1)
         blocks = torch.tensor([start_layer_idx, start_layer_idx + 1, start_layer_idx + self.n + 1], dtype=torch.long) 
-        return x.load(), v1.load(), v2.load(), blocks 
+        return x.load().to(self.dtype), v1.load().to(self.dtype), v2.load().to(self.dtype), blocks 
 
 
 class OptSimilaritiesDataset(ConsecutiveOutputsDataset):

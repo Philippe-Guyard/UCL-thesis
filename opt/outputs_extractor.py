@@ -55,7 +55,10 @@ def add_hooks(layers: nn.ModuleList, data_root: Path):
 
     def save_output_hook(layer_id: int):
         def save_output(layer: nn.Module, args, kwargs, output):
-            print('Got input', len(args), kwargs.keys())
+            hidden_states = args[0]
+            if hidden_states.size(1) != 1:
+                return 
+
             torch.save(args[0], make_path(layer_id))
 
             if layer_id == len(layers) - 1:
