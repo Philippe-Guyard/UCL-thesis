@@ -15,11 +15,11 @@ device = 'cuda'
 model = OPTForCausalLM.from_pretrained('facebook/opt-125m') 
 model = model.to(device)
 tokenizer = AutoTokenizer.from_pretrained('facebook/opt-125m')
-add_hooks(model.model.decoder.layers, Path('./tmp'))
+add_hooks(model.model.decoder.layers, Path('./data_longer'))
 total_params = sum(p.numel() for p in model.parameters())
 print(total_params // (10 ** 6))
 
-n_examples = 5
+n_examples = 25
 wikitext = load_dataset('Salesforce/wikitext', 'wikitext-103-v1')
 data = wikitext['train'].select(range(n_examples))
 model.eval()
@@ -31,7 +31,7 @@ with torch.no_grad():
         n_inputs = input_ids.size(1)
 
         SampleIds.cur_sample_id = idx
-        num_tokens_to_generate = 5 
-        output = model.generate(input_ids, max_length=n_inputs + num_tokens_to_generate, 
+        num_tokens_to_generate = 1000 
+        output = model.generate(input_ids, max_length=n_inputs + num_tokens_to_generate + 1, 
                             do_sample=True, top_k=50, top_p=0.95, eos_token_id=tokenizer.eos_token_id) 
 Timer.print()

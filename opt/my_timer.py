@@ -1,5 +1,7 @@
 import time 
-from typing import Dict, List  
+from typing import Dict, List, Tuple
+
+import torch 
 
 def format_duration_ns(nanoseconds):
     units = [
@@ -53,3 +55,53 @@ class Timer:
             print(f"{key}: Avg = {format_duration_ns(avg_time)}, Min = {format_duration_ns(min_time)}, Max = {format_duration_ns(max_time)}")
 
         Timer._comitted_times.clear()
+
+class CudaTimer:
+    # All times are in ns
+    _events: Dict[str, Tuple[torch.cuda.Event, torch.cuda.Event]] = dict()
+    _is_running: Dict[str, bool] = dict()
+    _comitted_times: Dict[str, List[float]] = dict() 
+
+    @staticmethod
+    def register(key: str):
+        if key not in CudaTimer._events:
+            CudaTimer._events[key] = (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True))
+            CudaTimer._is_running[key] = False 
+        
+        assert CudaTimer._is_running[key] is False, 'Event already running'
+        CudaTimer._is_running[key] = True
+        # Make sure the op queue in cuda is empty 
+        torch.cuda.synchronize()
+        # Start recording 
+        CudaTimer._events[key][0].record()
+        
+    @staticmethod
+    def commit(key: str):
+        assert CudaTimer._is_running.get(key, False) is True, 'Event not running'
+        # Place event.record in queue 
+        CudaTimer._events[key][1].record()
+        # Now the event recording is executed 
+        torch.cuda.synchronize()
+
+        if key not in CudaTimer._comitted_times:
+            CudaTimer._comitted_times[key] = list()
+
+        start_event, end_event = CudaTimer._events[key]
+        # The time is in millis, we want nanos 
+        time_elapsed = start_event.elapsed_time(end_event) * 1e6
+        CudaTimer._comitted_times[key].append(time_elapsed)
+        CudaTimer._is_running[key] = False
+
+    @staticmethod
+    def print():
+        ''' Print the average, min and max of every commited time ''' 
+        for key, running in CudaTimer._is_running.items():
+            assert not running, f'{key} still running'
+
+        for key, durations in CudaTimer._comitted_times.items():
+            avg_time = sum(durations) / len(durations)
+            min_time = min(durations)
+            max_time = max(durations)
+            print(f"{key}: Avg = {format_duration_ns(avg_time)}, Min = {format_duration_ns(min_time)}, Max = {format_duration_ns(max_time)}")
+
+        CudaTimer._comitted_times.clear()

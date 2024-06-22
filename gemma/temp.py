@@ -1,4 +1,5 @@
 import torch
+from torch.cuda.amp import autocast
 from tqdm import tqdm 
 
 from my_timer import Timer
@@ -8,13 +9,18 @@ from transformers import OPTConfig, AutoTokenizer
 from datasets import load_dataset, Dataset
 from modeling_gemma import GemmaForCausalLM 
 
+from accelerate import init_empty_weights, infer_auto_device_map, dispatch_model 
+
 assert torch.cuda.is_available()
 device = 'cuda'
+dtype = torch.bfloat16
 
 model_name = 'google/gemma-2b'
-model = GemmaForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16) 
-model = model.to(device)
+model = GemmaForCausalLM.from_pretrained(model_name, torch_dtype=dtype, device_map='auto') 
 tokenizer = AutoTokenizer.from_pretrained(model_name)
+# device_map = infer_auto_device_map(model, dtype=torch.bfloat16)
+# model = dispatch_model(model, device_map=device_map)
+
 
 total_params = sum(p.numel() for p in model.parameters())
 print(total_params // (10 ** 6))
@@ -27,20 +33,22 @@ data = wikitext['train'].select(range(n_examples))
 model.eval()
 
 with torch.no_grad():
-    for idx, x in tqdm(enumerate(data), total=n_examples):
-        # print('===================================')
-        question: str = x['text'] 
-        input_ids = tokenizer(question, return_tensors='pt').input_ids.to(device) 
-        n_inputs = input_ids.size(1)
+    with autocast(dtype=dtype):
+        for idx, x in tqdm(enumerate(data), total=n_examples):
+            # print('===================================')
+            question: str = x['text'] 
+            input_ids = tokenizer(question, return_tensors='pt').input_ids.to('cuda')
+            n_inputs = input_ids.size(1)
 
-        SampleIds.cur_sample_id = idx
-        # print(idx, len(question), n_inputs)
-        num_tokens_to_generate = 50 
-        # +1 because we skip the first token which is prompt ingestion 
-        output = model.generate(input_ids, max_length=n_inputs + num_tokens_to_generate + 1, 
-                            do_sample=True, top_k=50, top_p=0.95, eos_token_id=tokenizer.eos_token_id, use_cache=True) 
+            SampleIds.cur_sample_id = idx
+            # print(idx, len(question), n_inputs)
+            num_tokens_to_generate = 50 
+            # +1 because we skip the first token which is prompt ingestion 
+            output = model.generate(input_ids, max_length=n_inputs + num_tokens_to_generate + 1, 
+                                do_sample=True, top_k=50, top_p=0.95, eos_token_id=tokenizer.eos_token_id, use_cache=True) 
 
-        # print(question)
-        # print() 
-        # print(tokenizer.batch_decode(output)[0][len(question):])
+            # print(question)
+            # print() 
+            # print(tokenizer.batch_decode(output)[0][len(question):])
+    
 Timer.print()

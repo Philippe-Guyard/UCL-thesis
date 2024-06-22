@@ -51,7 +51,8 @@ from transformers.models.opt.configuration_opt import OPTConfig
 #     from flash_attn import flash_attn_func, flash_attn_varlen_func
 #     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
 
-from my_timer import Timer
+# from my_timer import Timer
+from my_timer import CudaTimer as Timer
 
 logger = logging.get_logger(__name__)
 
@@ -157,6 +158,7 @@ class OPTAttention(nn.Module):
         bsz, tgt_len, _ = hidden_states.size()
 
         # get query proj
+        Timer.register('Attention Projections')
         query_states = self.q_proj(hidden_states) * self.scaling
         # get key, value proj
         if is_cross_attention and past_key_value is not None:
@@ -192,9 +194,12 @@ class OPTAttention(nn.Module):
         query_states = self._shape(query_states, tgt_len, bsz).view(*proj_shape)
         key_states = key_states.view(*proj_shape)
         value_states = value_states.view(*proj_shape)
+        Timer.commit('Attention Projections')
 
         src_len = key_states.size(1)
+        Timer.register('Compute attn_weights')
         attn_weights = torch.bmm(query_states, key_states.transpose(1, 2))
+        Timer.commit('Compute attn_weights')
 
         if attn_weights.size() != (bsz * self.num_heads, tgt_len, src_len):
             raise ValueError(
@@ -239,7 +244,9 @@ class OPTAttention(nn.Module):
             attn_weights_reshaped = None
 
         attn_probs = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
+        Timer.register('Computing output')
         attn_output = torch.bmm(attn_probs, value_states)
+        Timer.commit('Computing output')
 
         if attn_output.size() != (bsz * self.num_heads, tgt_len, self.head_dim):
             raise ValueError(
@@ -254,7 +261,9 @@ class OPTAttention(nn.Module):
         # partitioned aross GPUs when using tensor-parallelism.
         attn_output = attn_output.reshape(bsz, tgt_len, self.embed_dim)
 
+        Timer.register('Out proj')
         attn_output = self.out_proj(attn_output)
+        Timer.commit('Out proj')
 
         return attn_output, attn_weights_reshaped, past_key_value
 
@@ -548,7 +557,27 @@ class OPTDecoderLayer(nn.Module):
             attention_mask=attention_mask,
             layer_head_mask=layer_head_mask,
             output_attentions=output_attentions,
+            # output_attentions=True
         )
+        # if self_attn_weights.shape[2] == 1:
+        #     entropies = []
+        #     for head in range(12): 
+        #         values = self_attn_weights[0][head][0]
+        #         values: torch.Tensor
+        #         entropy = -values.dot(torch.log(values))
+        #         entropies.append(entropy)
+        #     entropies = torch.tensor(entropies)
+        #     # print(entropies)
+        #     # print(torch.softmax(entropies, dim=-1))
+        # else:
+        #     # print(self_attn_weights.shape)
+        #     pass
+
+        # _, value_states = present_key_value
+        # value_states: torch.Tensor
+        # norms = value_states.norm(dim=-1)
+        # print(norms.mean(dim=-1))
+
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
         hidden_states = residual + hidden_states
 

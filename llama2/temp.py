@@ -11,7 +11,7 @@ from modeling_llama import LlamaForCausalLM
 assert torch.cuda.is_available()
 device = 'cuda'
 
-model_name = 'meta-llama/Llama-2-7b'
+model_name = 'TinyLlama/TinyLlama_v1.1'
 model = LlamaForCausalLM.from_pretrained(model_name) 
 model = model.to(device)
 tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -21,6 +21,8 @@ print(total_params // (10 ** 6))
 
 n_examples = 500
 wikitext = load_dataset('Salesforce/wikitext', 'wikitext-103-v1')
+print(len(wikitext['train']), len(wikitext['test']))
+exit()
 data = wikitext['train'].select(range(n_examples))
 model.eval()
 
