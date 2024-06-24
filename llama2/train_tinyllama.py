@@ -1,65 +1,36 @@
 # from modeling_llama import LlamaForCausalLM
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Tuple
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 
-from transformers import AutoTokenizer, Trainer, TrainingArguments, HfArgumentParser
+from transformers import AutoTokenizer, Trainer, TrainingArguments, HfArgumentParser, AutoConfig
 from transformers.activations import ACT2FN
-from transformers.models.llama.modeling_llama import LlamaForCausalLM, LlamaConfig
+from transformers.models.llama import LlamaForCausalLM, LlamaConfig, LlamaTokenizer
 from datasets import load_dataset, Dataset
 import evaluate
 
 # from trl import SFTTrainer
 from accelerate import PartialState
 
+def get_tinyllama(with_relu=True) -> Tuple[LlamaForCausalLM, LlamaTokenizer]:  
+    device_string = PartialState().process_index
+    model_name = "TinyLlama/TinyLlama_v1.1"
+    model_config = AutoConfig.from_pretrained(model_name)
+    if with_relu:
+        model_config: LlamaConfig
+        model_config.hidden_act = 'relu'
 
-@dataclass
-class PretrainingConfig:
-    run_name: str
-    train_batch_size: int
-    eval_batch_size: int
-    warmup_steps: int
-    seed: int
-    save_steps: int
-    eval_steps: int
-    logging_steps: int
-    train_size: int
-    eval_size: int
+    model = LlamaForCausalLM.from_pretrained(model_name, device_map={"": device_string}, config=model_config)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    if tokenizer.pad_token is None:
+        tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+        model.resize_token_embeddings(len(tokenizer))
 
-
-argparse = HfArgumentParser(PretrainingConfig)
-config: PretrainingConfig = argparse.parse_args_into_dataclasses()[0]
-
-root_folder = Path(config.run_name)
-
-
-def replace_activation_function(
-    model: LlamaForCausalLM, new_activation: Callable[[], nn.Module]
-):
-    config: LlamaConfig = model.config
-    cur_actfn = type(ACT2FN[config.hidden_act])
-    for module_name, module in model.named_modules():
-        # need to iterate over child since setattr does not work with . notation
-        for child_name, child in module.named_children():
-            if isinstance(child, cur_actfn):
-                setattr(module, child_name, new_activation())
-
-    return model
-
-
-device_string = PartialState().process_index
-model_name = "TinyLlama/TinyLlama_v1.1"
-model = LlamaForCausalLM.from_pretrained(model_name, device_map={"": device_string})
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-if tokenizer.pad_token is None:
-    tokenizer.add_special_tokens({"pad_token": "[PAD]"})
-    model.resize_token_embeddings(len(tokenizer))
-
-assert tokenizer.pad_token_id is not None
-
+    assert tokenizer.pad_token_id is not None
+    return model, tokenizer
 
 def to_tokenized_dataset(dataset: Dataset, num_samples: int, shuffle_seed=42):
     def tokenize_function(examples):
@@ -75,13 +46,13 @@ def to_tokenized_dataset(dataset: Dataset, num_samples: int, shuffle_seed=42):
         .map(tokenize_function, batched=True, remove_columns=["text"])
     )
 
+def get_dataset(train_size: int, eval_size: int, seed: int):
+    wikitext = load_dataset("Salesforce/wikitext", "wikitext-103-v1")
+    train_dataset = to_tokenized_dataset(wikitext["train"], train_size, seed)
+    test_dataset = to_tokenized_dataset(wikitext["test"], eval_size, seed)
+    return train_dataset, test_dataset
 
-wikitext = load_dataset("Salesforce/wikitext", "wikitext-103-v1")
-train_dataset = to_tokenized_dataset(wikitext["train"], config.train_size, config.seed)
-test_dataset = to_tokenized_dataset(wikitext["test"], config.eval_size, config.seed)
 perplexity_metric = evaluate.load("perplexity")
-
-
 def compute_metrics(eval_preds):
     logits, labels = eval_preds
     # Shift the logits and labels to align predictions with targets
@@ -96,7 +67,25 @@ def compute_metrics(eval_preds):
     )
     return {"perplexity": perplexity}
 
+@dataclass
+class PretrainingConfig:
+    run_name: str
+    train_batch_size: int
+    eval_batch_size: int
+    warmup_steps: int
+    seed: int
+    save_steps: int
+    eval_steps: int
+    logging_steps: int
+    train_size: int
+    eval_size: int
+    eval_accumulation_steps: int
 
+argparse = HfArgumentParser(PretrainingConfig)
+config: PretrainingConfig = argparse.parse_args_into_dataclasses()[0]
+model, tokenizer = get_tinyllama(with_relu=True)
+
+root_folder = Path(f'runs/{config.run_name}')
 training_args = TrainingArguments(
     # Misc
     output_dir=root_folder.joinpath("checkpoints"),
@@ -117,6 +106,7 @@ training_args = TrainingArguments(
     learning_rate=4e-4,
     eval_strategy="steps",
     eval_steps=500,
+    eval_accumulation_steps=16,
     # Logging
     logging_dir=root_folder.joinpath("logs"),
     logging_steps=10,
@@ -127,6 +117,7 @@ training_args = TrainingArguments(
     data_seed=config.seed,
 )
 
+train_dataset, test_dataset = get_dataset(config.train_size, config.eval_size, config.seed)
 trainer = Trainer(
     model=model,
     args=training_args,
@@ -135,4 +126,5 @@ trainer = Trainer(
     tokenizer=tokenizer,
     compute_metrics=compute_metrics,
 )
+
 trainer.train()

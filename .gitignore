@@ -7,6 +7,7 @@ gemma/data
 gemma/__pycache__
 
 llama2/data
+llama2/runs/*
 llama2/__pycache__
 
 lib_clean/__pycache__
