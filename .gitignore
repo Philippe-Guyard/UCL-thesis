@@ -11,4 +11,6 @@ llama2/runs/*
 llama2/__pycache__
 
 lib_clean/__pycache__
-lib_clean/data
+lib_clean/data*
+lib_clean/runs
+lib_clean/wandb
