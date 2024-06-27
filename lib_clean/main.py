@@ -76,8 +76,18 @@ def time_execution(model_name: str):
 
     for idx, layer in enumerate(get_decoder_layers(model)):
         time_execution_hooks(layer, f"Decoder Layer {idx}")
-        time_execution_hooks(layer.self_attn, "Self attention")
-        if hasattr(layer, 'mlp'):
+        if hasattr(layer, 'temporal_block'):
+            # RecurrentGemma case 
+            time_execution_hooks(layer.temporal_block, 'Temporal Block')
+        else:
+            # Gated models + OPT 
+            time_execution_hooks(layer.self_attn, "Self attention")
+
+        if hasattr(layer, 'mlp_block'):
+            # RecurrentGemma case 
+            time_execution_hooks(layer.mlp_block, 'MLP')
+        elif hasattr(layer, 'mlp'):
+            # Gated models
             time_execution_hooks(layer.mlp, 'MLP')
         else:
             # Opt case 
@@ -92,6 +102,7 @@ config: MainConfig = HfArgumentParser(MainConfig).parse_args_into_dataclasses()[
 if config.time_execution:
     time_execution(config.model_name)
 if config.collect_output:
+    assert config.output_dir is not None 
     collect_output(config.model_name, config.output_dir)
 
 # time_execution()
