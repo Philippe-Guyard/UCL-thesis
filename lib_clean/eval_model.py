@@ -56,8 +56,9 @@ def eval_all_checkpoints(run_name: str, tasks: List[str], csv_out: Path):
 def eval_model(model_name: str, tasks: List[str], csv_out: Path):
     all_results = {task: [] for task in tasks}
     all_results['model'] = [model_name]
+    results = evaluate_checkpoint(model_name, tasks)
     for task in tasks:
-        all_results[task].append(format_result(all_results, task))
+        all_results[task].append(format_result(results, task))
     
     df = pd.DataFrame(all_results)
     df = df.set_index('model')

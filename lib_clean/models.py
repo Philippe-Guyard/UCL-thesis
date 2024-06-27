@@ -51,15 +51,16 @@ def get_recurrent_gemma(model_name: str, with_relu=False):
 
 ModelType = OPTForCausalLM | Qwen2ForCausalLM | GemmaForCausalLM | LlamaForCausalLM | RecurrentGemmaForCausalLM
 def get_model(model_name: str, **model_kwargs) -> Tuple[ModelType, PreTrainedTokenizer]:
-    getters_map = {
-        'qwen2': get_gated_model,
-        'opt': get_opt,
-        'llama': get_gated_model,
-        'gemma': get_gated_model,
-        'recurrentgemma': get_recurrent_gemma,
-    } 
+    # NOTE: Order matters here, e.g recurrentgemma has to go before gemma 
+    getters_map = [ 
+        ('qwen2', get_gated_model),
+        ('opt', get_opt),
+        ('llama', get_gated_model),
+        ('recurrentgemma', get_recurrent_gemma),
+        ('gemma', get_gated_model),
+    ] 
 
-    for key, func in getters_map.items():
+    for key, func in getters_map:
         if key in model_name.lower():
             return func(model_name, **model_kwargs)
     
