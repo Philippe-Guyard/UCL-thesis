@@ -1,3 +1,4 @@
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 from hooks import save_layer_io_hooks, time_execution_hooks, SampleIds
@@ -16,10 +17,9 @@ class MainConfig:
     model_name: str
     time_execution: bool 
     collect_output: bool 
+    benchmark: bool
     output_dir: Optional[str] = field(default=None)
 
-assert torch.cuda.is_available()
-device = "cuda"
 
 def get_data(n_examples: int):
     wikitext = load_dataset("Salesforce/wikitext", "wikitext-103-v1")
@@ -27,6 +27,8 @@ def get_data(n_examples: int):
 
 @torch.no_grad
 def run_once(data, model: ModelType, tokenizer: PreTrainedTokenizer, tokens_per_sample=50):
+    assert torch.cuda.is_available()
+    device = "cuda"
     model.eval()
     model = model.to(device)
     max_examples = len(data) // 2
@@ -71,6 +73,7 @@ def collect_output(model_name: str, output_dir: str):
     run_once(data, model, tokenizer)
 
 def time_execution(model_name: str):
+    # Benchmarks execution time of different parts of the model 
     data = get_data(50)
     model, tokenizer = get_model(model_name) 
 
@@ -98,12 +101,70 @@ def time_execution(model_name: str):
     run_once(data, model, tokenizer)
     Timer.print()
 
-config: MainConfig = HfArgumentParser(MainConfig).parse_args_into_dataclasses()[0]
-if config.time_execution:
-    time_execution(config.model_name)
-if config.collect_output:
-    assert config.output_dir is not None 
-    collect_output(config.model_name, config.output_dir)
+def benchmark(model_name: str):
+    # Benchmark model input ingestion and output generation speed
+    assert torch.cuda.is_available()
+    device = "cuda"
+    data = get_data(100)
+    model, tokenizer = get_model(model_name)
+    model.eval()
+    model = model.to(device)
 
-# time_execution()
-# collect_output()
+    max_examples = len(data) // 2
+
+    input_speeds = []
+    output_speeds = []
+
+    with torch.no_grad():
+        for x in tqdm(data):
+            question: str = x["text"]
+            if len(question) == 0:
+                continue
+
+            input_ids = tokenizer(question, return_tensors="pt").input_ids.to(device)
+            n_inputs = input_ids.size(1)
+
+            num_tokens_to_generate = 1
+            start = time.perf_counter_ns()
+            output = model.generate(
+                input_ids,
+                max_length=n_inputs + num_tokens_to_generate,
+                do_sample=True,
+                top_k=50,
+                top_p=0.95,
+                eos_token_id=tokenizer.eos_token_id,
+            )
+            time_ns = time.perf_counter_ns() - start
+            input_speed = n_inputs / (time_ns / (10**9))
+            input_speeds.append(input_speed)
+            # print(f'Ingested {n_inputs} tokens with speed {} t/s')
+
+            num_tokens_to_generate = 2 * n_inputs
+            start = time.perf_counter_ns()
+            output = model.generate(
+                input_ids,
+                max_length=n_inputs + num_tokens_to_generate,
+                do_sample=True,
+                top_k=50,
+                top_p=0.95,
+                eos_token_id=tokenizer.eos_token_id,
+            )
+            time_ns = time.perf_counter_ns() - start
+            output_speed = num_tokens_to_generate / (time_ns / (10**9))
+            output_speeds.append(output_speed)
+    
+    average_input_speed  = torch.mean(torch.tensor(input_speeds)).detach().cpu()
+    average_output_speed = torch.mean(torch.tensor(output_speeds)).detach().cpu()
+    return average_input_speed, average_output_speed
+
+if __name__ == '__main__':
+    config: MainConfig = HfArgumentParser(MainConfig).parse_args_into_dataclasses()[0]
+    if config.time_execution:
+        time_execution(config.model_name)
+    if config.collect_output:
+        assert config.output_dir is not None 
+        collect_output(config.model_name, config.output_dir)
+    if config.benchmark:
+        input_speed, output_speed = benchmark(config.model_name)
+        print(input_speed, output_speed)
+

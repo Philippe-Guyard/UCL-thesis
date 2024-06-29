@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import List, Optional
 import pandas as pd
 
+from scripts import benchmark
+
 from lm_eval import evaluator, tasks
 from transformers import HfArgumentParser
 
@@ -51,7 +53,7 @@ def eval_all_checkpoints(run_name: str, tasks: List[str], csv_out: Path):
 
     df = pd.DataFrame(all_results)
     df = df.set_index('checkpoint').sort_index()
-    df.to_csv(csv_out)
+    return df 
 
 def eval_model(model_name: str, tasks: List[str], csv_out: Path):
     all_results = {task: [] for task in tasks}
@@ -62,7 +64,7 @@ def eval_model(model_name: str, tasks: List[str], csv_out: Path):
     
     df = pd.DataFrame(all_results)
     df = df.set_index('model')
-    df.to_csv(csv_out)
+    return df 
 
 @dataclass
 class EvalConfig:
@@ -70,6 +72,7 @@ class EvalConfig:
     csv_out: str = field(default='eval_results.csv')
     model_name: Optional[str] = field(default=None)
     run_name: Optional[str] = field(default=None)
+    benchmark: Optional[bool] = field(default=False)
 
 if __name__ == '__main__':
     config: EvalConfig = HfArgumentParser(EvalConfig).parse_args_into_dataclasses()[0]
@@ -79,6 +82,18 @@ if __name__ == '__main__':
     assert not csv_out.exists(), f'{csv_out} already exists'
 
     if config.model_name:
-        eval_model(config.model_name, tasks, csv_out)
+        df = eval_model(config.model_name, tasks, csv_out)
     else:
-        eval_all_checkpoints(config.run_name, tasks, csv_out)
+        df = eval_all_checkpoints(config.run_name, tasks, csv_out)
+
+    if config.benchmark:
+        input_speeds, output_speeds = [], []
+        for model_name in df.index:
+           input_speed, output_speed = benchmark(model_name)
+           input_speeds.append(input_speed)
+           output_speeds.append(output_speeds)
+        
+        df['input_speed'] = input_speeds
+        df['output_speed'] = output_speeds
+
+    df.to_csv(csv_out)

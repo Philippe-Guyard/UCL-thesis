@@ -1,4 +1,7 @@
+import json
+from pathlib import Path
 from typing import Any, Tuple
+
 from transformers import (
     OPTForCausalLM,
     AutoTokenizer,
@@ -49,8 +52,7 @@ def get_recurrent_gemma(model_name: str, with_relu=False):
     return model, tokenizer
 
 
-ModelType = OPTForCausalLM | Qwen2ForCausalLM | GemmaForCausalLM | LlamaForCausalLM | RecurrentGemmaForCausalLM
-def get_model(model_name: str, **model_kwargs) -> Tuple[ModelType, PreTrainedTokenizer]:
+def model_getter(model_name: str):
     # NOTE: Order matters here, e.g recurrentgemma has to go before gemma 
     getters_map = [ 
         ('qwen2', get_gated_model),
@@ -62,7 +64,20 @@ def get_model(model_name: str, **model_kwargs) -> Tuple[ModelType, PreTrainedTok
 
     for key, func in getters_map:
         if key in model_name.lower():
-            return func(model_name, **model_kwargs)
+            return func
     
     assert False, 'Unkown model name'
 
+ModelType = OPTForCausalLM | Qwen2ForCausalLM | GemmaForCausalLM | LlamaForCausalLM | RecurrentGemmaForCausalLM
+def get_model(model_name: str, **model_kwargs) -> Tuple[ModelType, PreTrainedTokenizer]:
+    model_is_local = model_name.startswith('./') or model_name.startswith('/')
+    base_model_str = model_name
+    if model_is_local:
+        config_path = Path(model_name, 'config.json')
+        with open(config_path) as config_file:
+            cfg = json.load(config_file)
+            base_model_str = cfg['_name_or_path']  
+
+    # Need to fetch this getter separately as loading a llama model is different from loading a recgemma or opt model 
+    getter = model_getter(base_model_str)
+    return getter(model_name, **model_kwargs)

@@ -1,7 +1,7 @@
 # from modeling_llama import LlamaForCausalLM
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 import torch.nn as nn
@@ -73,25 +73,34 @@ class PretrainingConfig:
     train_size: int
     eval_size: int
     eval_accumulation_steps: int
+	mixed_precision: bool = field(default=False)
+	gradient_checkpointing: bool = field(default=False)
+	gradient_accumulation_steps: int = field(default=1)
+    eval_strategy: str = field(default='no')
 
 config: PretrainingConfig = HfArgumentParser(PretrainingConfig).parse_args_into_dataclasses()[0]
 model, tokenizer = get_trainable_model(config.model_name)
+
+bf16, fp16 = False, False 
+if config.mixed_precision:
+	fp16 = not torch.cuda.is_bf16_supported(),
+    bf16 = torch.cuda.is_bf16_supported(),
 
 root_folder = Path(f'runs/{config.run_name}')
 training_args = TrainingArguments(
     # Misc
     output_dir=root_folder.joinpath("checkpoints"),
-    fp16=not torch.cuda.is_bf16_supported(),
-    bf16=torch.cuda.is_bf16_supported(),
-    bf16_full_eval=torch.cuda.is_bf16_supported(),
-    fp16_full_eval=not torch.cuda.is_bf16_supported(),
     save_steps=config.save_steps,
     metric_for_best_model="perplexity",
     greater_is_better=False,
+	bf16=b16,
+	fp16=fp16,
+	gradient_checkpointing=config.gradient_checkpointing,
     # Training hypers
     num_train_epochs=1,
     per_device_train_batch_size=config.train_batch_size,
     per_device_eval_batch_size=config.eval_batch_size,
+	gradient_accumulation_steps=config.gradient_accumulation_steps,
     warmup_steps=config.warmup_steps,
     max_grad_norm=1,
     weight_decay=0.1,
@@ -99,8 +108,8 @@ training_args = TrainingArguments(
     adam_beta2=0.95,
     lr_scheduler_type="cosine",
     learning_rate=4e-4,
-    eval_strategy="steps",
-    eval_steps=500,
+    eval_strategy=config.eval_strategy,
+    eval_steps=config.eval_steps,
     eval_accumulation_steps=config.eval_accumulation_steps,
     # Logging
     logging_dir=root_folder.joinpath("logs"),
