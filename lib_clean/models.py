@@ -47,7 +47,7 @@ def get_recurrent_gemma(model_name: str, with_relu=False):
         config.hidden_activation = 'relu'
     
     device_string = PartialState().process_index
-    model = AutoModelForCausalLM.from_pretrained(model_name, config=config, device_map={'': device_string})
+    model = RecurrentGemmaForCausalLM.from_pretrained(model_name, config=config, device_map={'': device_string})
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     return model, tokenizer
 
