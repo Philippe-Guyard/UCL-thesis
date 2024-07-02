@@ -149,12 +149,13 @@ def benchmark(model_name: str):
                 top_p=0.95,
                 eos_token_id=tokenizer.eos_token_id,
             )
+            tokens_generated = output.size(1) - n_inputs
             time_ns = time.perf_counter_ns() - start
-            output_speed = num_tokens_to_generate / (time_ns / (10**9))
+            output_speed = tokens_generated / (time_ns / (10**9))
             output_speeds.append(output_speed)
     
-    average_input_speed  = torch.mean(torch.tensor(input_speeds)).detach().cpu()
-    average_output_speed = torch.mean(torch.tensor(output_speeds)).detach().cpu()
+    average_input_speed  = torch.mean(torch.tensor(input_speeds)).detach().cpu().item()
+    average_output_speed = torch.mean(torch.tensor(output_speeds)).detach().cpu().item()
     return average_input_speed, average_output_speed
 
 if __name__ == '__main__':

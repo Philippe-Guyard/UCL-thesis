@@ -6,6 +6,7 @@ from typing import List, Optional
 import pandas as pd
 
 from scripts import benchmark
+from models import get_basemodel_name
 
 from lm_eval import evaluator, tasks
 from transformers import HfArgumentParser
@@ -42,22 +43,23 @@ def eval_all_checkpoints(run_name: str, tasks: List[str], csv_out: Path):
     checkpoints_folder = Path(f'./runs/{run_name}/checkpoints')
     all_checkpoints = [f for f in checkpoints_folder.iterdir() if f.is_dir()]
     all_results = {task: [] for task in tasks}
-    all_results["checkpoint"] = []
+    all_results["model"] = []
 
     for checkpoint in all_checkpoints: 
         results = evaluate_checkpoint(checkpoint.as_posix(), tasks)
         
-        all_results["checkpoint"].append(checkpoint)
+        model_str = f'{get_basemodel_name(checkpoint.as_posix())}-{checkpoint.name}'
+        all_results["model"].append(checkpoint)
         for task in tasks:
             all_results[task].append(format_result(all_results, task))
 
     df = pd.DataFrame(all_results)
-    df = df.set_index('checkpoint').sort_index()
+    df = df.set_index('model').sort_index()
     return df 
 
 def eval_model(model_name: str, tasks: List[str], csv_out: Path):
     all_results = {task: [] for task in tasks}
-    all_results['model'] = [model_name]
+    all_results['model'] = [get_basemodel_name(model_name)]
     results = evaluate_checkpoint(model_name, tasks)
     for task in tasks:
         all_results[task].append(format_result(results, task))
@@ -91,7 +93,7 @@ if __name__ == '__main__':
         for model_name in df.index:
            input_speed, output_speed = benchmark(model_name)
            input_speeds.append(input_speed)
-           output_speeds.append(output_speeds)
+           output_speeds.append(output_speed)
         
         df['input_speed'] = input_speeds
         df['output_speed'] = output_speeds

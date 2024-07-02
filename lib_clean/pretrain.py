@@ -73,18 +73,19 @@ class PretrainingConfig:
     train_size: int
     eval_size: int
     eval_accumulation_steps: int
-	mixed_precision: bool = field(default=False)
-	gradient_checkpointing: bool = field(default=False)
-	gradient_accumulation_steps: int = field(default=1)
+    mixed_precision: bool = field(default=False)
+    gradient_checkpointing: bool = field(default=False)
+    gradient_accumulation_steps: int = field(default=1)
     eval_strategy: str = field(default='no')
+    optim: str = field(default='adamw_torch')
 
 config: PretrainingConfig = HfArgumentParser(PretrainingConfig).parse_args_into_dataclasses()[0]
 model, tokenizer = get_trainable_model(config.model_name)
 
 bf16, fp16 = False, False 
 if config.mixed_precision:
-	fp16 = not torch.cuda.is_bf16_supported(),
-    bf16 = torch.cuda.is_bf16_supported(),
+    fp16 = not torch.cuda.is_bf16_supported()
+    bf16 = torch.cuda.is_bf16_supported()
 
 root_folder = Path(f'runs/{config.run_name}')
 training_args = TrainingArguments(
@@ -93,9 +94,11 @@ training_args = TrainingArguments(
     save_steps=config.save_steps,
     metric_for_best_model="perplexity",
     greater_is_better=False,
-	bf16=b16,
+	bf16=bf16,
 	fp16=fp16,
 	gradient_checkpointing=config.gradient_checkpointing,
+    gradient_checkpointing_kwargs={'use_reentrant':False},
+    optim=config.optim,
     # Training hypers
     num_train_epochs=1,
     per_device_train_batch_size=config.train_batch_size,
@@ -120,6 +123,7 @@ training_args = TrainingArguments(
     seed=config.seed,
     data_seed=config.seed,
 )
+print(training_args)
 
 train_dataset, test_dataset = get_dataset(config.train_size, config.eval_size, config.seed)
 trainer = Trainer(

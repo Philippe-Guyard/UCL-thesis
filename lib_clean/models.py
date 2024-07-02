@@ -52,8 +52,21 @@ def get_recurrent_gemma(model_name: str, with_relu=False):
     return model, tokenizer
 
 
-def model_getter(model_name: str):
-    # NOTE: Order matters here, e.g recurrentgemma has to go before gemma 
+def get_basemodel_name(model_name: str):
+    model_is_local = model_name.startswith('./') or model_name.startswith('/') or model_name.startswith('../')
+    base_name = model_name
+    if model_is_local:
+        config_path = Path(model_name, 'config.json')
+        with open(config_path) as config_file:
+            cfg = json.load(config_file)
+            base_name = cfg['_name_or_path']  
+
+    return base_name
+
+ModelType = OPTForCausalLM | Qwen2ForCausalLM | GemmaForCausalLM | LlamaForCausalLM | RecurrentGemmaForCausalLM
+def get_model(model_name: str, **model_kwargs) -> Tuple[ModelType, PreTrainedTokenizer]:
+    # Check by base_name, load model_name
+    base_name = get_basemodel_name(model_name)
     getters_map = [ 
         ('qwen2', get_gated_model),
         ('opt', get_opt),
@@ -63,21 +76,7 @@ def model_getter(model_name: str):
     ] 
 
     for key, func in getters_map:
-        if key in model_name.lower():
-            return func
+        if key in base_name.lower():
+            return func(model_name, **model_kwargs)
     
-    assert False, 'Unkown model name'
-
-ModelType = OPTForCausalLM | Qwen2ForCausalLM | GemmaForCausalLM | LlamaForCausalLM | RecurrentGemmaForCausalLM
-def get_model(model_name: str, **model_kwargs) -> Tuple[ModelType, PreTrainedTokenizer]:
-    model_is_local = model_name.startswith('./') or model_name.startswith('/')
-    base_model_str = model_name
-    if model_is_local:
-        config_path = Path(model_name, 'config.json')
-        with open(config_path) as config_file:
-            cfg = json.load(config_file)
-            base_model_str = cfg['_name_or_path']  
-
-    # Need to fetch this getter separately as loading a llama model is different from loading a recgemma or opt model 
-    getter = model_getter(base_model_str)
-    return getter(model_name, **model_kwargs)
+    assert False, 'Unkown base model'
