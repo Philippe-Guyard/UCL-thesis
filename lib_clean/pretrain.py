@@ -1,6 +1,6 @@
 # from modeling_llama import LlamaForCausalLM
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
 import torch
@@ -64,23 +64,27 @@ class PretrainingConfig:
     model_name: str
     run_name: str
     train_batch_size: int
-    eval_batch_size: int
     warmup_steps: int
     seed: int
-    save_steps: int
-    eval_steps: int
     logging_steps: int
     train_size: int
-    eval_size: int
-    eval_accumulation_steps: int
+    num_checkpoints: int 
     mixed_precision: bool = field(default=False)
     gradient_checkpointing: bool = field(default=False)
     gradient_accumulation_steps: int = field(default=1)
     eval_strategy: str = field(default='no')
     optim: str = field(default='adamw_torch')
+    eval_batch_size: int = field(default=8)
+    eval_steps: Optional[int] = field(default=None)
+    eval_size: int = field(default=1)
+    eval_accumulation_steps: int = field(default=1)
+
 
 config: PretrainingConfig = HfArgumentParser(PretrainingConfig).parse_args_into_dataclasses()[0]
 model, tokenizer = get_trainable_model(config.model_name)
+
+train_batches = (config.train_size + config.train_batch_size - 1) // config.train_batch_size
+save_steps = train_batches // config.num_checkpoints
 
 bf16, fp16 = False, False 
 if config.mixed_precision:
@@ -91,7 +95,7 @@ root_folder = Path(f'runs/{config.run_name}')
 training_args = TrainingArguments(
     # Misc
     output_dir=root_folder.joinpath("checkpoints"),
-    save_steps=config.save_steps,
+    save_steps=save_steps,
     metric_for_best_model="perplexity",
     greater_is_better=False,
 	bf16=bf16,
@@ -136,3 +140,7 @@ trainer = Trainer(
 )
 
 trainer.train()
+
+final_path = root_folder.joinpath('final')
+model.save_pretrained(final_path)
+tokenizer.save_pretrained(final_path)
