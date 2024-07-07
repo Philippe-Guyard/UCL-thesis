@@ -49,7 +49,7 @@ def eval_all_checkpoints(run_name: str, tasks: List[str], csv_out: Path):
         results = evaluate_checkpoint(checkpoint.as_posix(), tasks)
         
         model_str = f'{get_basemodel_name(checkpoint.as_posix())}-{checkpoint.name}'
-        all_results["model"].append(checkpoint)
+        all_results["model"].append(model_str)
         for task in tasks:
             all_results[task].append(format_result(results, task))
 
@@ -75,6 +75,7 @@ class EvalConfig:
     model_name: Optional[str] = field(default=None)
     run_name: Optional[str] = field(default=None)
     benchmark: Optional[bool] = field(default=False)
+    append: Optional[bool] = field(default=False)
 
 if __name__ == '__main__':
     config: EvalConfig = HfArgumentParser(EvalConfig).parse_args_into_dataclasses()[0]
@@ -97,5 +98,9 @@ if __name__ == '__main__':
         
         df['input_speed'] = input_speeds
         df['output_speed'] = output_speeds
+
+    if config.append:
+        df_old = pd.read_csv(config.csv_out)
+        df = df.merge(df_old, how='outer')
 
     df.to_csv(csv_out)

@@ -9,7 +9,7 @@ import torch.nn as nn
 from transformers import AutoTokenizer, Trainer, TrainingArguments, HfArgumentParser, AutoConfig
 from transformers.activations import ACT2FN
 from transformers.models.llama import LlamaForCausalLM, LlamaConfig, LlamaTokenizer
-from datasets import load_dataset, Dataset
+from datasets import load_dataset, Dataset, load_from_disk
 import evaluate
 
 from models import get_model
@@ -38,10 +38,16 @@ def to_tokenized_dataset(dataset: Dataset, num_samples: int, shuffle_seed=42):
         .map(tokenize_function, remove_columns=["text"])
     )
 
-def get_dataset(train_size: int, eval_size: int, seed: int):
-    wikitext = load_dataset("Salesforce/wikitext", "wikitext-103-v1")
-    train_dataset = to_tokenized_dataset(wikitext["train"], train_size, seed)
-    test_dataset = to_tokenized_dataset(wikitext["test"], eval_size, seed)
+def get_dataset(name: str, train_size: int, eval_size: int, seed: int):
+    if name == 'wikitext':
+        wikitext = load_dataset("Salesforce/wikitext", "wikitext-103-v1")
+        train_dataset = to_tokenized_dataset(wikitext["train"], train_size, seed)
+        test_dataset = to_tokenized_dataset(wikitext["test"], eval_size, seed)
+    else:
+        slimpajama = load_from_disk(name)
+        train_dataset = to_tokenized_dataset(slimpajama, train_size, seed)
+        test_dataset = None 
+
     return train_dataset, test_dataset
 
 perplexity_metric = evaluate.load("perplexity")
@@ -69,6 +75,7 @@ class PretrainingConfig:
     logging_steps: int
     train_size: int
     num_checkpoints: int 
+    dataset_name: str = field(default='wikitext')
     mixed_precision: bool = field(default=False)
     gradient_checkpointing: bool = field(default=False)
     gradient_accumulation_steps: int = field(default=1)
@@ -83,8 +90,8 @@ class PretrainingConfig:
 config: PretrainingConfig = HfArgumentParser(PretrainingConfig).parse_args_into_dataclasses()[0]
 model, tokenizer = get_trainable_model(config.model_name)
 
-train_batches = (config.train_size + config.train_batch_size - 1) // config.train_batch_size
-save_steps = train_batches // config.num_checkpoints
+# This is apparently supported by huggingface 
+save_steps = 1. / config.num_checkpoints 
 
 bf16, fp16 = False, False 
 if config.mixed_precision:
@@ -95,6 +102,7 @@ root_folder = Path(f'runs/{config.run_name}')
 training_args = TrainingArguments(
     # Misc
     output_dir=root_folder.joinpath("checkpoints"),
+    save_strategy='steps',
     save_steps=save_steps,
     metric_for_best_model="perplexity",
     greater_is_better=False,
@@ -129,7 +137,7 @@ training_args = TrainingArguments(
 )
 print(training_args)
 
-train_dataset, test_dataset = get_dataset(config.train_size, config.eval_size, config.seed)
+train_dataset, test_dataset = get_dataset(config.dataset_name, config.train_size, config.eval_size, config.seed)
 trainer = Trainer(
     model=model,
     args=training_args,
