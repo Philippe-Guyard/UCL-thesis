@@ -1,7 +1,9 @@
 import time
 from dataclasses import dataclass, field
 from typing import Optional
-from hooks import save_layer_io_hooks, time_execution_hooks, SampleIds
+
+from hooks import save_layer_io_hooks, time_execution_hooks
+from tensor_utils import TensorStorage
 from simple_timer import Timer
 from models import ModelType, get_model
 
@@ -26,7 +28,7 @@ def get_data(n_examples: int):
     return wikitext["train"].select(range(2 * n_examples))
 
 @torch.no_grad
-def run_once(data, model: ModelType, tokenizer: PreTrainedTokenizer, tokens_per_sample=50):
+def run_once(data, model: ModelType, tokenizer: PreTrainedTokenizer, tokens_per_sample=50, tensor_storage_dir=None):
     assert torch.cuda.is_available()
     device = "cuda"
     model.eval()
@@ -43,7 +45,6 @@ def run_once(data, model: ModelType, tokenizer: PreTrainedTokenizer, tokens_per_
         input_ids = tensors.input_ids.to(device)
         attention_mask = tensors.attention_mask.to(device)
 
-        SampleIds.cur_sample_id = idx
         _ = model.generate(
             input_ids,
             attention_mask=attention_mask,
@@ -54,6 +55,8 @@ def run_once(data, model: ModelType, tokenizer: PreTrainedTokenizer, tokens_per_
             eos_token_id=tokenizer.eos_token_id,
             pad_token_id=tokenizer.eos_token_id
         )
+        if tensor_storage_dir is not None:
+            TensorStorage.commit_sample(tensor_storage_dir)
 
         idx += 1
         pbar.update(1)
@@ -68,9 +71,9 @@ def get_decoder_layers(model: ModelType):
 def collect_output(model_name: str, output_dir: str):
     data = get_data(100)
     model, tokenizer = get_model(model_name) 
-    save_layer_io_hooks(get_decoder_layers(model), Path(output_dir))
+    save_layer_io_hooks(get_decoder_layers(model))
 
-    run_once(data, model, tokenizer)
+    run_once(data, model, tokenizer, tensor_storage_dir=Path(output_dir))
 
 def time_execution(model_name: str):
     # Benchmarks execution time of different parts of the model 
@@ -121,14 +124,16 @@ def benchmark(model_name: str):
             if len(question) == 0:
                 continue
 
-            input_ids = tokenizer(question, return_tensors="pt").input_ids.to(device)
+            tensors = tokenizer(question, return_tensors='pt', return_attention_mask=True)
+            input_ids = tensors.input_ids.to(device)
+            attention_mask = tensors.attention_mask.to(device)
             n_inputs = input_ids.size(1)
 
-            num_tokens_to_generate = 1
             start = time.perf_counter_ns()
             output = model.generate(
                 input_ids,
-                max_length=n_inputs + num_tokens_to_generate,
+                attention_mask=attention_mask,
+                max_new_tokens=1,
                 do_sample=True,
                 top_k=50,
                 top_p=0.95,
@@ -143,7 +148,8 @@ def benchmark(model_name: str):
             start = time.perf_counter_ns()
             output = model.generate(
                 input_ids,
-                max_length=n_inputs + num_tokens_to_generate,
+                attention_mask=attention_mask,
+                max_new_tokens=num_tokens_to_generate,
                 do_sample=True,
                 top_k=50,
                 top_p=0.95,
