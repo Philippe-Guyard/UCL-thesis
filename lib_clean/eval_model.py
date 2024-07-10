@@ -11,24 +11,32 @@ from models import get_basemodel_name
 from lm_eval import evaluator, tasks
 from transformers import HfArgumentParser
 
-# task_list = ["mmlu_college_physics", "hellaswag"]
+def get_metric_values(results, task):
+    task_results = results['results'][task]
+    metric_key = None 
+    for key in task_results:
+        if ',' not in key:
+            continue 
 
-def get_acc_and_stderr(result, task):
-    if 'acc' in result['results'][task]:
-        acc = result['results'][task]['acc']
-        stderr = result['results'][task].get('acc_stderr', 0)
-    elif 'acc,none' in result['results'][task]:
-        acc = result['results'][task]['acc,none']
-        stderr = result['results'][task].get('acc_stderr,none', 0)
-    else:
-        acc = stderr = 0
-    return acc, stderr
+        metric_name, filter = key.split(',')
+        if metric_name.endswith('stderr'):
+            metric_name = metric_name.split('_')[0]
+            metric_key = f'{metric_name},{filter}'
+            break
+
+    assert metric_key is not None, 'Could not find metric key'
+    metric_name, filter = metric_key.split(',')
+    print(f'Using metric {metric_name} with filter {filter} for task {task}')
+    mean = task_results[metric_key] 
+    stderr = task_results[f'{metric_name}_stderr,{filter}']
+
+    return mean, stderr
 
 def format_number(mean, stderr):
     return f"{mean:.2f}±{stderr:.2f}"
 
 def format_result(results, task):
-    acc, stderr = get_acc_and_stderr(results, task) 
+    acc, stderr = get_metric_values(results, task) 
     return format_number(acc, stderr)
 
 def evaluate_checkpoint(model_path: str, tasks: List[str]):
