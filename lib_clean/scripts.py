@@ -68,6 +68,12 @@ def get_decoder_layers(model: ModelType):
     decoder = base_model.decoder if hasattr(base_model, 'decoder') else base_model
     return decoder.layers
 
+def set_decoder_layers(model: ModelType, layers):
+    base_model = model.model
+    decoder = base_model.decoder if hasattr(base_model, 'decoder') else base_model
+    decoder.layers = layers
+    return model
+
 def collect_output(model_name: str, output_dir: str):
     data = get_data(100)
     model, tokenizer = get_model(model_name) 

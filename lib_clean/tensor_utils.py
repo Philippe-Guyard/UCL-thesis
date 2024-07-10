@@ -136,7 +136,7 @@ class ConsecutiveOutputsDataset(Dataset):
 class ConsecutiveCosineSimilarities(ConsecutiveOutputsDataset):
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         x, v1, v2, blocks = super().__getitem__(idx)
-        cos_sim = F.cosine_similarity(v1, v2, dim=-1).view(-1)
+        cos_sim = F.cosine_similarity(v1, v2, dim=-1).view(-1).clip(-1, 1)
         return x.reshape(-1), cos_sim, blocks[0] 
     
 class ConsecutiveAngularDistances(ConsecutiveOutputsDataset):

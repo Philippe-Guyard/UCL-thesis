@@ -18,7 +18,7 @@ def save_layer_io_hooks(layers: nn.ModuleList):
             TensorStorage.save_embedding(hidden_states, layer_id)
 
             if layer_id == len(layers) - 1:
-                TensorStorage.save_embedding(hidden_states, layer_id + 1)
+                TensorStorage.save_embedding(output[0], layer_id + 1)
 
         return save_output
 
