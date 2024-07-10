@@ -24,9 +24,12 @@ def get_acc_and_stderr(result, task):
         acc = stderr = 0
     return acc, stderr
 
+def format_number(mean, stderr):
+    return f"{mean:.2f}±{stderr:.2f}"
+
 def format_result(results, task):
     acc, stderr = get_acc_and_stderr(results, task) 
-    return f"{acc:.2f}±{stderr:.2f}"
+    return format_number(acc, stderr)
 
 def evaluate_checkpoint(model_path: str, tasks: List[str]):
     results = evaluator.simple_evaluate(
@@ -92,9 +95,9 @@ if __name__ == '__main__':
     if config.benchmark:
         input_speeds, output_speeds = [], []
         for model_name in df.index:
-           input_speed, output_speed = benchmark(model_name)
-           input_speeds.append(input_speed)
-           output_speeds.append(output_speed)
+           input_speed, input_std, output_speed, output_std = benchmark(model_name)
+           input_speeds.append(format_number(input_speed, input_std))
+           output_speeds.append(format_number(output_speed, output_std))
         
         df['input_speed'] = input_speeds
         df['output_speed'] = output_speeds

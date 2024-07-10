@@ -160,9 +160,12 @@ def benchmark(model_name: str):
             output_speed = tokens_generated / (time_ns / (10**9))
             output_speeds.append(output_speed)
     
-    average_input_speed  = torch.mean(torch.tensor(input_speeds)).detach().cpu().item()
-    average_output_speed = torch.mean(torch.tensor(output_speeds)).detach().cpu().item()
-    return average_input_speed, average_output_speed
+    input_speeds = torch.tensor(input_speeds).detach().cpu()
+    output_speeds = torch.tensor(output_speeds).detach().cpu()
+    return (
+        input_speeds.mean().item(), input_speeds.std().item(),
+        output_speeds.mean().item(), output_speeds.std().item()
+    ) 
 
 if __name__ == '__main__':
     config: MainConfig = HfArgumentParser(MainConfig).parse_args_into_dataclasses()[0]
@@ -172,6 +175,6 @@ if __name__ == '__main__':
         assert config.output_dir is not None 
         collect_output(config.model_name, config.output_dir)
     if config.benchmark:
-        input_speed, output_speed = benchmark(config.model_name)
-        print(input_speed, output_speed)
+        input_speed, input_std, output_speed, output_std = benchmark(config.model_name)
+        print(f'{input_speed:.2f}+-{input_std:.2f}, {output_speed:.2f}+-{output_std:.2f}')
 
