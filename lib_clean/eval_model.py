@@ -6,7 +6,7 @@ from typing import List, Optional
 import pandas as pd
 
 from scripts import benchmark
-from models import get_basemodel_name
+from models import get_basemodel_name, is_local_model_name
 
 from lm_eval import evaluator, tasks
 from transformers import HfArgumentParser
@@ -40,6 +40,10 @@ def format_result(results, task):
     return format_number(acc, stderr)
 
 def evaluate_checkpoint(model_path: str, tasks: List[str]):
+    if len(tasks) == 0:
+        # Only benchmarking case 
+        return None 
+
     results = evaluator.simple_evaluate(
         model="hf",
         model_args=f"pretrained={model_path}",
@@ -50,7 +54,7 @@ def evaluate_checkpoint(model_path: str, tasks: List[str]):
     )
     return results
 
-def eval_all_checkpoints(run_name: str, tasks: List[str], csv_out: Path):
+def eval_all_checkpoints(run_name: str, tasks: List[str]):
     checkpoints_folder = Path(f'./runs/{run_name}/checkpoints')
     all_checkpoints = [f for f in checkpoints_folder.iterdir() if f.is_dir()]
     all_results = {task: [] for task in tasks}
@@ -68,7 +72,7 @@ def eval_all_checkpoints(run_name: str, tasks: List[str], csv_out: Path):
     df = df.set_index('model').sort_index()
     return df 
 
-def eval_model(model_name: str, tasks: List[str], csv_out: Path):
+def eval_model(model_name: str, tasks: List[str]):
     all_results = {task: [] for task in tasks}
     all_results['model'] = [get_basemodel_name(model_name)]
     results = evaluate_checkpoint(model_name, tasks)
@@ -81,24 +85,35 @@ def eval_model(model_name: str, tasks: List[str], csv_out: Path):
 
 @dataclass
 class EvalConfig:
-    tasks: str # Comma-separated list
+    tasks: Optional[str] = field(default=None) # Comma-separated list
     csv_out: str = field(default='eval_results.csv')
     model_name: Optional[str] = field(default=None)
     run_name: Optional[str] = field(default=None)
     benchmark: Optional[bool] = field(default=False)
     append: Optional[bool] = field(default=False)
+    metadata: Optional[str] = field(default=None)
 
 if __name__ == '__main__':
     config: EvalConfig = HfArgumentParser(EvalConfig).parse_args_into_dataclasses()[0]
     assert (config.model_name is None) ^ (config.run_name is None), 'Exactly one of --model_name or --run_name should be specified'
     csv_out = Path(config.csv_out)
-    tasks = config.tasks.split(',')
     assert not csv_out.exists(), f'{csv_out} already exists'
 
+    # Only benchmarking case, maybe should be done somewhere else 
+    tasks = config.tasks.split(',') if config.tasks is not None else []
+
     if config.model_name:
-        df = eval_model(config.model_name, tasks, csv_out)
+        df = eval_model(config.model_name, tasks)
     else:
-        df = eval_all_checkpoints(config.run_name, tasks, csv_out)
+        df = eval_all_checkpoints(config.run_name, tasks)
+    
+    if config.metadata:
+        df['metadata'] = config.metadata
+    elif config.model_name is not None:
+        # if model is local then metadata is path
+        df['metadata'] = config.model_name if is_local_model_name(config.model_name) else 'HF model' 
+    else:
+        df['metadata'] = 'Pretrained model'
 
     if config.benchmark:
         input_speeds, output_speeds = [], []

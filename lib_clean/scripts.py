@@ -114,7 +114,8 @@ def benchmark(model_name: str):
     # Benchmark model input ingestion and output generation speed
     assert torch.cuda.is_available()
     device = "cuda"
-    data = get_data(100)
+    # A bigger number here because 100 gives very high stds
+    data = get_data(1000)
     model, tokenizer = get_model(model_name)
     model.eval()
     model = model.to(device)

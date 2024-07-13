@@ -51,9 +51,11 @@ def get_recurrent_gemma(model_name: str, with_relu=False):
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     return model, tokenizer
 
+def is_local_model_name(model_name: str):
+    return Path(model_name).exists() 
 
 def get_basemodel_name(model_name: str):
-    model_is_local = model_name.startswith('./') or model_name.startswith('/') or model_name.startswith('../')
+    model_is_local = is_local_model_name(model_name)
     base_name = model_name
     if model_is_local:
         config_path = Path(model_name, 'config.json')
