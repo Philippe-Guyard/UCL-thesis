@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from simple_timer import Timer
+from simple_timer import CudaTimer as Timer
 from tensor_utils import TensorStorage
 
 import torch.nn as nn

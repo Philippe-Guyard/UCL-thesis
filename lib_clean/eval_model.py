@@ -69,7 +69,6 @@ def eval_all_checkpoints(run_name: str, tasks: List[str]):
             all_results[task].append(format_result(results, task))
 
     df = pd.DataFrame(all_results)
-    df = df.set_index('model').sort_index()
     return df 
 
 def eval_model(model_name: str, tasks: List[str]):
@@ -80,7 +79,6 @@ def eval_model(model_name: str, tasks: List[str]):
         all_results[task].append(format_result(results, task))
     
     df = pd.DataFrame(all_results)
-    df = df.set_index('model')
     return df 
 
 @dataclass
@@ -97,7 +95,8 @@ if __name__ == '__main__':
     config: EvalConfig = HfArgumentParser(EvalConfig).parse_args_into_dataclasses()[0]
     assert (config.model_name is None) ^ (config.run_name is None), 'Exactly one of --model_name or --run_name should be specified'
     csv_out = Path(config.csv_out)
-    assert not csv_out.exists(), f'{csv_out} already exists'
+    if not config.append:
+        assert not csv_out.exists(), f'{csv_out} already exists'
 
     # Only benchmarking case, maybe should be done somewhere else 
     tasks = config.tasks.split(',') if config.tasks is not None else []
@@ -106,6 +105,8 @@ if __name__ == '__main__':
         df = eval_model(config.model_name, tasks)
     else:
         df = eval_all_checkpoints(config.run_name, tasks)
+
+    df = df.set_index('model').sort_index()
     
     if config.metadata:
         df['metadata'] = config.metadata
@@ -126,7 +127,7 @@ if __name__ == '__main__':
         df['output_speed'] = output_speeds
 
     if config.append:
-        df_old = pd.read_csv(config.csv_out)
-        df = df.merge(df_old, how='outer')
+        df_old = pd.read_csv(config.csv_out, index_col='model')
+        df = pd.concat([df_old, df]) 
 
     df.to_csv(csv_out)
