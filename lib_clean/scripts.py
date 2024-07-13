@@ -120,10 +120,13 @@ def benchmark(model_name: str):
     model.eval()
     model = model.to(device)
 
-    max_examples = len(data) // 2
-
+    # Discard the first n examples to account for gpu warmup time 
+    n_burnin = 100
     input_speeds = []
     output_speeds = []
+
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
 
     with torch.no_grad():
         for x in tqdm(data):
@@ -136,7 +139,9 @@ def benchmark(model_name: str):
             attention_mask = tensors.attention_mask.to(device)
             n_inputs = input_ids.size(1)
 
-            start = time.perf_counter_ns()
+            # start = time.perf_counter_ns()
+            torch.cuda.synchronize()
+            start_event.record()
             output = model.generate(
                 input_ids,
                 attention_mask=attention_mask,
@@ -146,13 +151,19 @@ def benchmark(model_name: str):
                 top_p=0.95,
                 eos_token_id=tokenizer.eos_token_id,
             )
-            time_ns = time.perf_counter_ns() - start
+            # time_ns = time.perf_counter_ns() - start
+            end_event.record()
+            torch.cuda.synchronize()
+            time_ns = start_event.elapsed_time(end_event) * 1000
+
             input_speed = n_inputs / (time_ns / (10**9))
             input_speeds.append(input_speed)
             # print(f'Ingested {n_inputs} tokens with speed {} t/s')
 
-            num_tokens_to_generate = 2 * n_inputs
-            start = time.perf_counter_ns()
+            num_tokens_to_generate = 256
+            # start = time.perf_counter_ns()
+            torch.cuda.synchronize()
+            start_event.record()
             output = model.generate(
                 input_ids,
                 attention_mask=attention_mask,
@@ -162,13 +173,16 @@ def benchmark(model_name: str):
                 top_p=0.95,
                 eos_token_id=tokenizer.eos_token_id,
             )
+            end_event.record()
+            torch.cuda.synchronize()
+            # time_ns = time.perf_counter_ns() - start
+            time_ns = start_event.elapsed_time(end_event) * 1000
             tokens_generated = output.size(1) - n_inputs
-            time_ns = time.perf_counter_ns() - start
             output_speed = tokens_generated / (time_ns / (10**9))
             output_speeds.append(output_speed)
     
-    input_speeds = torch.tensor(input_speeds).detach().cpu()
-    output_speeds = torch.tensor(output_speeds).detach().cpu()
+    input_speeds = torch.tensor(input_speeds[n_burnin:]).detach().cpu()
+    output_speeds = torch.tensor(output_speeds[n_burnin:]).detach().cpu()
     return (
         input_speeds.mean().item(), input_speeds.std().item(),
         output_speeds.mean().item(), output_speeds.std().item()
