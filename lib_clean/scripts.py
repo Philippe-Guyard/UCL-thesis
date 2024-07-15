@@ -75,7 +75,7 @@ def set_decoder_layers(model: ModelType, layers):
     return model
 
 def collect_output(model_name: str, output_dir: str):
-    data = get_data(1000)
+    data = get_data(100)
     model, tokenizer = get_model(model_name) 
     save_layer_io_hooks(get_decoder_layers(model))
 
@@ -120,18 +120,35 @@ def benchmark(model_name: str):
     assert torch.cuda.is_available()
     device = "cuda"
     # A bigger number here because 100 gives very high stds
-    data = get_data(10)
+    data = get_data(1000)
     model, tokenizer = get_model(model_name)
+    # set_decoder_layers(model, get_decoder_layers(model)[:4])
     model.eval()
     model = model.to(device)
 
     # Discard the first n examples to account for gpu warmup time 
-    n_burnin = 1
+    n_burnin = 50
     input_speeds = []
     output_speeds = []
 
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
+
+    # To do: Next step if normal benchmarking still behaves weirdly 
+    # def timer_hook(timer_func: str):
+    #     func = getattr(Timer, timer_func)
+    #     def register_forward_pass(layer, *args):
+    #         hidden_states = args[0][0]
+    #         if hidden_states.size(1) > 1:
+    #             func('Prompt ingestion')
+    #         else:
+    #             func('Token generation')
+        
+    #     return register_forward_pass
+
+    # layers = get_decoder_layers(model)
+    # layers[0].register_forward_pre_hook(timer_hook('register'))
+    # layers[-1].register_forward_hook(timer_hook('commit'))
 
     with torch.no_grad():
         for x in tqdm(data):
@@ -147,21 +164,23 @@ def benchmark(model_name: str):
             # start = time.perf_counter_ns()
             torch.cuda.synchronize()
             start_event.record()
-            output = model.generate(
-                input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=1,
-                do_sample=True,
-                top_k=50,
-                top_p=0.95,
-                eos_token_id=tokenizer.eos_token_id,
-            )
+            # output = model.generate(
+            #     input_ids,
+            #     attention_mask=attention_mask,
+            #     max_new_tokens=1,
+            #     do_sample=True,
+            #     top_k=50,
+            #     top_p=0.95,
+            #     eos_token_id=tokenizer.eos_token_id,
+            # )
+            # A forward pass is more representative because it contains less noise compared to model.generate
+            output = model(input_ids, attention_mask=attention_mask)
             # time_ns = time.perf_counter_ns() - start
             # input_speed = n_inputs / (time_ns / (10**9))
             end_event.record()
             torch.cuda.synchronize()
-            time_ms = start_event.elapsed_time(end_event)
-            input_speed = n_inputs / (time_ms / 1000)
+            ingestion_time_ms = start_event.elapsed_time(end_event)
+            input_speed = n_inputs / (ingestion_time_ms / 1000)
             
             input_speeds.append(input_speed)
             # print(f'Ingested {n_inputs} tokens with speed {} t/s')
@@ -185,14 +204,23 @@ def benchmark(model_name: str):
             # time_ns = time.perf_counter_ns() - start
             # output_speed = tokens_generated / (time_ns / (10**9))
             time_ms = start_event.elapsed_time(end_event) 
-            output_speed = tokens_generated / (time_ms / 1000)
+            # Don't count the first token since it is part of ingestion time 
+            output_speed = (tokens_generated - 1) / ((time_ms - ingestion_time_ms) / 1000)
             output_speeds.append(output_speed)
     
-    input_speeds = torch.tensor(input_speeds[n_burnin:]).detach().cpu()
-    output_speeds = torch.tensor(output_speeds[n_burnin:]).detach().cpu()
+    # Timer.print()
+    # print(f'Ingestion average: {sum(input_times) / len(input_times):.2f} ms')
+    # print(f'Generation average: {sum(output_times) / len(output_times):.2f} ms')
+    def compute_speed_metrics(speeds, n_burnin, outlier_quantile=0.05):
+        speeds_tensor = torch.tensor(speeds).detach().cpu()[:n_burnin]
+        min_speed = speeds_tensor.quantile(outlier_quantile)
+        max_speed = speeds_tensor.quantile(1 - outlier_quantile)
+        speeds_tensor = speeds_tensor.clip(min_speed, max_speed)
+        return speeds_tensor.mean(), speeds_tensor.std()
+
     return (
-        input_speeds.mean().item(), input_speeds.std().item(),
-        output_speeds.mean().item(), output_speeds.std().item()
+        *compute_speed_metrics(input_speeds, n_burnin),
+        *compute_speed_metrics(input_speeds, n_burnin)
     ) 
 
 if __name__ == '__main__':
