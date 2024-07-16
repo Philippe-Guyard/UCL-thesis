@@ -11,6 +11,7 @@ class TensorStorage:
     sample_idx: int = 0
     # First dim = block idx, Second dim = token idx  
     _cur_sample: List[List[torch.Tensor]] = []
+    _cur_inputs: List[torch.Tensor] = []
 
     @staticmethod
     @lru_cache(maxsize=500)
@@ -19,9 +20,11 @@ class TensorStorage:
 
     @staticmethod
     def _get_path(data_root: Path, sample_idx: int, block_idx: int) -> Path:
+        # block_idx = -1 for input_ids 
+        block_str = f'block{block_idx}' if block_idx >= 0 else 'inputs'
         return ( 
             data_root
-            .joinpath(f'block{block_idx}')
+            .joinpath(block_str)
             .joinpath(f's{sample_idx}.pt')
         )
 
@@ -39,6 +42,11 @@ class TensorStorage:
     
     @staticmethod
     def commit_sample(data_root: Path):
+        path = TensorStorage._get_path(data_root, TensorStorage.sample_idx, -1)
+        path.parent.mkdir(exist_ok=True, parents=True)
+        # dim=0 here because we do unsqueeze(0) when appending 
+        torch.save(torch.cat(TensorStorage._cur_inputs, dim=0), path)
+
         for block_idx, block in enumerate(TensorStorage._cur_sample):
             if len(block) == 0:
                 continue
@@ -47,9 +55,10 @@ class TensorStorage:
             path.parent.mkdir(exist_ok=True, parents=True)
             # dim=0 here because we do unsqueeze(0) when appending 
             torch.save(torch.cat(block, dim=0), path)
-
+        
         TensorStorage.token_idx = 0
         TensorStorage._cur_sample = []
+        TensorStorage._cur_inputs = []
         TensorStorage.sample_idx += 1
 
     @staticmethod
@@ -65,7 +74,69 @@ class TensorStorage:
 
         # Do unsqueeze(0) to make sure that the returned tensors are of the same shape as the original hidden states  
         TensorStorage._cur_sample[block_idx].append(data.cpu().unsqueeze(0))
-        
+    
+    @staticmethod
+    def save_input_ids(input_ids: torch.Tensor):
+        TensorStorage._cur_inputs.append(input_ids.cpu().unsqueeze(0))
+    
+    @staticmethod
+    def get_input_ids(data_root: Path, sample_idx: int, token_idx: int):
+        path = TensorStorage._get_path(data_root, sample_idx, -1)
+        data = TensorStorage._load_tensor(path)
+        return data[token_idx]
+
+    @staticmethod
+    def get_num_tokens(data_root: Path, sample_idx: int):
+        # Num tokens should be consistent across blocks 
+        # Just load block 0 and return num tokens 
+        sample_data = torch.load(TensorStorage._get_path(data_root, sample_idx, 0))
+        return sample_data.size(0)
+
+class BlockOutputsDataset(Dataset):
+    def __init__(self, data_root: Path, input_embeddings=True):
+        self.data_root = data_root 
+        self.num_layers = len(list(data_root.iterdir()))
+        self.num_samples = len(list(data_root.joinpath('block0').iterdir()))
+        # Whether to use embeddings or input ids as x 
+        self.input_embeddings = input_embeddings
+
+        self.token_prefix = torch.zeros(self.num_samples, dtype=torch.int) 
+        for sample_idx in range(self.num_samples):
+            self.token_prefix[sample_idx] = TensorStorage.get_num_tokens(self.data_root, sample_idx)
+            if sample_idx > 0:
+                self.token_prefix[sample_idx] += self.token_prefix[sample_idx - 1]
+
+    def __len__(self):
+        # This is a pref sum array, the last element is the sum of sample lengths
+        return self.token_prefix[self.num_samples - 1].item()
+    
+    def _find_in_prefix(self, prefix: torch.Tensor, value) -> Tuple[int, int]:
+        idx = torch.searchsorted(prefix, value, right=True)
+        prev_values = 0 if idx == 0 else prefix[idx - 1].item()
+        return idx.item(), int(prev_values)
+    
+    def _get_flat_embedding(self, sample_idx, block_idx, token_idx):
+        return TensorStorage.get_embedding(self.data_root, sample_idx, block_idx, token_idx).view(-1)
+
+    def __getitem__(self, index: int):
+        sample_idx, sample_offset = self._find_in_prefix(self.token_prefix, index)
+        token_idx = index - sample_offset
+
+        block_outputs = torch.stack(tuple(
+            self._get_flat_embedding(sample_idx, block_idx, token_idx) 
+            for block_idx in range(1, self.num_layers)
+        )) 
+        cos_similarities = F.cosine_similarity(block_outputs[:-1], block_outputs[1:])    
+        cos_similarities = torch.clamp(cos_similarities, -1.0, 1.0) 
+        angular_distances = torch.acos(cos_similarities) / torch.pi
+        if self.input_embeddings:
+            input_embedding = self._get_flat_embedding(sample_idx, 0, token_idx)
+        else:
+            input_embedding = TensorStorage.get_input_ids(self.data_root, sample_idx, token_idx)
+
+        return input_embedding, angular_distances
+
+
 class ConsecutiveOutputsDataset(Dataset):
     def __init__(self, data_root: Path, n: int, num_layers: Optional[int]=None, num_samples: Optional[int]=None):
         self.data_root = data_root 
@@ -131,7 +202,6 @@ class ConsecutiveOutputsDataset(Dataset):
         v2 = TensorStorage.get_embedding(self.data_root, sample_idx, start_layer_idx + self.n + 1, token_idx)
         blocks = torch.tensor([start_layer_idx, start_layer_idx + 1, start_layer_idx + self.n + 1], dtype=torch.long) 
         return x, v1, v2, blocks 
-
 
 class ConsecutiveCosineSimilarities(ConsecutiveOutputsDataset):
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:

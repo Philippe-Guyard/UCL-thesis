@@ -45,6 +45,9 @@ def run_once(data, model: ModelType, tokenizer: PreTrainedTokenizer, tokens_per_
         input_ids = tensors.input_ids.to(device)
         attention_mask = tensors.attention_mask.to(device)
 
+        if tensor_storage_dir is not None:
+            TensorStorage.save_input_ids(input_ids)
+
         _ = model.generate(
             input_ids,
             attention_mask=attention_mask,
@@ -134,21 +137,29 @@ def benchmark(model_name: str):
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
 
-    # To do: Next step if normal benchmarking still behaves weirdly 
-    # def timer_hook(timer_func: str):
-    #     func = getattr(Timer, timer_func)
-    #     def register_forward_pass(layer, *args):
-    #         hidden_states = args[0][0]
-    #         if hidden_states.size(1) > 1:
-    #             func('Prompt ingestion')
-    #         else:
-    #             func('Token generation')
-        
-    #     return register_forward_pass
+    def timer_hook(start=False):
+        def register_forward_pass(layer, *args):
+            if start:
+                torch.cuda.synchronize()
+                start_event.record()
+            else:
+                end_event.record()
+                torch.cuda.synchronize()
 
-    # layers = get_decoder_layers(model)
-    # layers[0].register_forward_pre_hook(timer_hook('register'))
-    # layers[-1].register_forward_hook(timer_hook('commit'))
+            hidden_states = args[0][0]
+            n_tokens = hidden_states.size(1) 
+            forward_pass_time = end_event.elapsed_time(start_event) / 1000
+            speed = n_tokens / forward_pass_time 
+            if hidden_states.size(1) > 1:
+                input_speeds.append(speed)
+            else:
+                output_speeds.append(speed)
+        
+        return register_forward_pass
+
+    layers = get_decoder_layers(model)
+    layers[0].register_forward_pre_hook(timer_hook('register'))
+    layers[-1].register_forward_hook(timer_hook('commit'))
 
     with torch.no_grad():
         for x in tqdm(data):
@@ -159,36 +170,18 @@ def benchmark(model_name: str):
             tensors = tokenizer(question, return_tensors='pt', return_attention_mask=True)
             input_ids = tensors.input_ids.to(device)
             attention_mask = tensors.attention_mask.to(device)
-            n_inputs = input_ids.size(1)
 
-            # start = time.perf_counter_ns()
-            torch.cuda.synchronize()
-            start_event.record()
-            # output = model.generate(
-            #     input_ids,
-            #     attention_mask=attention_mask,
-            #     max_new_tokens=1,
-            #     do_sample=True,
-            #     top_k=50,
-            #     top_p=0.95,
-            #     eos_token_id=tokenizer.eos_token_id,
-            # )
-            # A forward pass is more representative because it contains less noise compared to model.generate
-            output = model(input_ids, attention_mask=attention_mask)
-            # time_ns = time.perf_counter_ns() - start
-            # input_speed = n_inputs / (time_ns / (10**9))
-            end_event.record()
-            torch.cuda.synchronize()
-            ingestion_time_ms = start_event.elapsed_time(end_event)
-            input_speed = n_inputs / (ingestion_time_ms / 1000)
+            output = model.generate(
+                input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=1,
+                do_sample=True,
+                top_k=50,
+                top_p=0.95,
+                eos_token_id=tokenizer.eos_token_id,
+            )
             
-            input_speeds.append(input_speed)
-            # print(f'Ingested {n_inputs} tokens with speed {} t/s')
-
             num_tokens_to_generate = 1024
-            # start = time.perf_counter_ns()
-            torch.cuda.synchronize()
-            start_event.record()
             output = model.generate(
                 input_ids,
                 attention_mask=attention_mask,
@@ -198,19 +191,7 @@ def benchmark(model_name: str):
                 top_p=0.95,
                 eos_token_id=tokenizer.eos_token_id,
             )
-            end_event.record()
-            torch.cuda.synchronize()
-            tokens_generated = output.size(1) - n_inputs
-            # time_ns = time.perf_counter_ns() - start
-            # output_speed = tokens_generated / (time_ns / (10**9))
-            time_ms = start_event.elapsed_time(end_event) 
-            # Don't count the first token since it is part of ingestion time 
-            output_speed = (tokens_generated - 1) / ((time_ms - ingestion_time_ms) / 1000)
-            output_speeds.append(output_speed)
     
-    # Timer.print()
-    # print(f'Ingestion average: {sum(input_times) / len(input_times):.2f} ms')
-    # print(f'Generation average: {sum(output_times) / len(output_times):.2f} ms')
     def compute_speed_metrics(speeds, n_burnin, outlier_quantile=0.05):
         speeds_tensor = torch.tensor(speeds).detach().cpu()[:n_burnin]
         min_speed = speeds_tensor.quantile(outlier_quantile)
