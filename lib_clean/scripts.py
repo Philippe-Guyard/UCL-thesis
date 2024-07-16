@@ -1,3 +1,4 @@
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -122,15 +123,27 @@ def benchmark(model_name: str):
     # Benchmark model input ingestion and output generation speed
     assert torch.cuda.is_available()
     device = "cuda"
-    # A bigger number here because 100 gives very high stds
-    data = get_data(1000)
     model, tokenizer = get_model(model_name)
-    # set_decoder_layers(model, get_decoder_layers(model)[:4])
     model.eval()
     model = model.to(device)
+    # A bigger number here because 100 gives very high stds
+    def count_tokens(tokenizer):
+        def f(example):
+            # Tokenize the text and return the number of tokens
+            return {'num_tokens': len(tokenizer.tokenize(example['text']))}
+        
+        return f
 
-    # Discard the first n examples to account for gpu warmup time 
-    n_burnin = 50
+    data = (
+        load_dataset("Salesforce/wikitext", "wikitext-103-v1")['train']
+        .map(count_tokens(tokenizer))
+        .filter(lambda example: 240 <= example['num_tokens'] <= 260)
+        .select(range(10_000))
+    )
+    # set_decoder_layers(model, get_decoder_layers(model)[:4])
+
+    # Discard the first n tokens to account for gpu warmup time 
+    n_burnin = 1024
     input_speeds = []
     output_speeds = []
 
@@ -146,20 +159,21 @@ def benchmark(model_name: str):
                 end_event.record()
                 torch.cuda.synchronize()
 
-            hidden_states = args[0][0]
-            n_tokens = hidden_states.size(1) 
-            forward_pass_time = end_event.elapsed_time(start_event) / 1000
-            speed = n_tokens / forward_pass_time 
-            if hidden_states.size(1) > 1:
-                input_speeds.append(speed)
-            else:
-                output_speeds.append(speed)
+                hidden_states = args[0][0]
+                n_tokens = hidden_states.size(1) 
+                forward_pass_time = start_event.elapsed_time(end_event) / 1000
+                speed = n_tokens / forward_pass_time 
+                if n_tokens > 1:
+                    nonlocal input_speeds
+                    input_speeds += n_tokens * [speed]
+                else:
+                    output_speeds.append(speed)
         
         return register_forward_pass
 
     layers = get_decoder_layers(model)
-    layers[0].register_forward_pre_hook(timer_hook('register'))
-    layers[-1].register_forward_hook(timer_hook('commit'))
+    layers[0].register_forward_pre_hook(timer_hook(True))
+    layers[-1].register_forward_hook(timer_hook(False))
 
     with torch.no_grad():
         for x in tqdm(data):
@@ -169,6 +183,7 @@ def benchmark(model_name: str):
 
             tensors = tokenizer(question, return_tensors='pt', return_attention_mask=True)
             input_ids = tensors.input_ids.to(device)
+            n_inputs = input_ids.size(1) 
             attention_mask = tensors.attention_mask.to(device)
 
             output = model.generate(
@@ -181,7 +196,7 @@ def benchmark(model_name: str):
                 eos_token_id=tokenizer.eos_token_id,
             )
             
-            num_tokens_to_generate = 1024
+            num_tokens_to_generate = 256
             output = model.generate(
                 input_ids,
                 attention_mask=attention_mask,
@@ -199,9 +214,15 @@ def benchmark(model_name: str):
         speeds_tensor = speeds_tensor.clip(min_speed, max_speed)
         return speeds_tensor.mean(), speeds_tensor.std()
 
+    # with open('./data.json', 'w') as f:
+    #     json.dump({
+    #         'input_speeds': input_speeds,
+    #         'output_speeds': output_speeds
+    #     }, f)
+
     return (
         *compute_speed_metrics(input_speeds, n_burnin),
-        *compute_speed_metrics(input_speeds, n_burnin)
+        *compute_speed_metrics(output_speeds, n_burnin)
     ) 
 
 if __name__ == '__main__':
