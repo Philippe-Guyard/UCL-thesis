@@ -139,7 +139,6 @@ def benchmark(model_name: str):
 
     data = (
         load_dataset("Salesforce/wikitext", "wikitext-103-v1")['train']
-        .select(range(100_000))
         .map(count_tokens(tokenizer))
         .filter(lambda example: 240 <= example['num_tokens'] <= 260)
         .select(range(50))
