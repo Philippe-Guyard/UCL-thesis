@@ -134,6 +134,8 @@ def benchmark(model_name: str):
     assert torch.cuda.is_available()
     device = "cuda"
     model, tokenizer = get_model(model_name)
+    # Sometimes this is needed to avoid warnings 
+    model.generation_config.pad_token_id = tokenizer.eos_token_id 
     model.eval()
     model = model.to(device)
     def count_tokens(tokenizer):
