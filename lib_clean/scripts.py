@@ -141,7 +141,7 @@ def benchmark(model_name: str):
         load_dataset("Salesforce/wikitext", "wikitext-103-v1")['train']
         .map(count_tokens(tokenizer))
         .filter(lambda example: 240 <= example['num_tokens'] <= 260)
-        .select(range(50))
+        .select(range(500))
     )
 
     n_burnin = 25
