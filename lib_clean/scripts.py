@@ -121,13 +121,6 @@ def time_execution(model_name: str):
     run_once(data, model, tokenizer)
     Timer.print()
 
-import math
-
-def round_to_sig_figs(num, sig_figs):
-    if num == 0:
-        return 0
-    else:
-        return round(num, sig_figs - int(math.floor(math.log10(abs(num)))) - 1)
 
 def benchmark(model_name: str):
     # Benchmark model input ingestion and output generation speed
@@ -146,9 +139,10 @@ def benchmark(model_name: str):
 
     data = (
         load_dataset("Salesforce/wikitext", "wikitext-103-v1")['train']
+        .select(range(100_000))
         .map(count_tokens(tokenizer))
         .filter(lambda example: 240 <= example['num_tokens'] <= 260)
-        .select(range(500))
+        .select(range(50))
     )
 
     n_burnin = 25
@@ -171,7 +165,7 @@ def benchmark(model_name: str):
                 hidden_states = args[0][0]
                 n_tokens = hidden_states.size(1) 
                 forward_pass_time = start_event.elapsed_time(end_event) / 1000
-                speed = round_to_sig_figs(n_tokens / forward_pass_time, 3) 
+                speed = n_tokens / forward_pass_time
                 if n_tokens > 1:
                     input_speeds.append(speed)
                 else:

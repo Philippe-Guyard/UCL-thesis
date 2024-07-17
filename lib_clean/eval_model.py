@@ -55,6 +55,7 @@ def evaluate_checkpoint(model_path: str, tasks: List[str]):
     return results
 
 def eval_all_checkpoints(run_name: str, tasks: List[str]):
+    assert False, 'Model full path not implemented'
     checkpoints_folder = Path(f'./runs/{run_name}/checkpoints')
     all_checkpoints = [f for f in checkpoints_folder.iterdir() if f.is_dir()]
     all_results = {task: [] for task in tasks}
@@ -74,6 +75,7 @@ def eval_all_checkpoints(run_name: str, tasks: List[str]):
 def eval_model(model_name: str, tasks: List[str]):
     all_results = {task: [] for task in tasks}
     all_results['model'] = [get_basemodel_name(model_name)]
+    all_results['model_path'] = [model_name]
     results = evaluate_checkpoint(model_name, tasks)
     for task in tasks:
         all_results[task].append(format_result(results, task))
@@ -106,7 +108,7 @@ if __name__ == '__main__':
     else:
         df = eval_all_checkpoints(config.run_name, tasks)
 
-    df = df.set_index('model').sort_index()
+    df = df.set_index('model_path').sort_index()
     
     if config.metadata:
         df['metadata'] = config.metadata
@@ -127,7 +129,7 @@ if __name__ == '__main__':
         df['output_speed'] = output_speeds
 
     if config.append:
-        df_old = pd.read_csv(config.csv_out, index_col='model')
+        df_old = pd.read_csv(config.csv_out, index_col='model_path')
         df = pd.concat([df_old, df]) 
 
     df.to_csv(csv_out)
