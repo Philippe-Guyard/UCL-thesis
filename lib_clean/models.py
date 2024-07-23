@@ -2,6 +2,10 @@ import json
 from pathlib import Path
 from typing import Any, Tuple
 
+import torch
+
+from gpt import GPT2ForLayerPruning, GPTConfig
+
 from transformers import (
     OPTForCausalLM,
     AutoTokenizer,
@@ -54,7 +58,8 @@ def get_recurrent_gemma(model_name: str, with_relu=False):
 def is_local_model_name(model_name: str):
     return Path(model_name).exists() 
 
-def get_basemodel_name(model_name: str):
+def get_basemodel_name(model_name: str, depth=0):
+    assert depth <= 5, 'Maximum depth reached when finding base model'
     model_is_local = is_local_model_name(model_name)
     base_name = model_name
     if model_is_local:
@@ -62,6 +67,9 @@ def get_basemodel_name(model_name: str):
         with open(config_path) as config_file:
             cfg = json.load(config_file)
             base_name = cfg['_name_or_path']  
+
+    if is_local_model_name(base_name):
+        base_name = get_basemodel_name(base_name, depth + 1)
 
     return base_name
 
@@ -82,3 +90,71 @@ def get_model(model_name: str, **model_kwargs) -> Tuple[ModelType, PreTrainedTok
             return func(model_name, **model_kwargs)
     
     assert False, 'Unkown base model'
+
+class AssistantHooks:
+    def __init__(self, model: GPT2ForLayerPruning) -> None:
+        self.skip_layers = set()
+        self.model = model
+        # Perform the computation asynchronously 
+        self.compute_stream = torch.cuda.Stream()
+        self.compute_event = torch.cuda.Event()
+    
+    def maybe_skip(self, layer_index):
+        def hook(module, args, kwargs):
+            assert not kwargs['output_attentions']
+            assert not kwargs['use_cache']
+            if layer_index == 0:
+                # Wait for the computation to finish before processing the first layer
+                self.compute_event.synchronize()
+            
+            hidden_states = args[0] if len(args) > 0 else kwargs['hidden_states']
+            if layer_index in self.skip_layers:
+                return hidden_states
+
+        return hook
+    
+    def set_skip_layers(self, module, args, kwargs, output):
+        assert not kwargs['output_attentions']
+        assert not kwargs['use_cache']
+        hidden_states = args[0] if len(args) > 0 else kwargs['hidden_states']
+        assert hidden_states.size(0) == 1, 'Batch size > 1 not supported yet'
+        # Perform the computation on a separate CUDA stream
+        with torch.cuda.stream(self.compute_stream):
+            scores = self.model(hidden_states)
+            self.skip_layers = set(torch.topk(scores, 2, largest=False).indices.tolist())
+            # Record the event to signal the end of computation
+            self.compute_event.record(self.compute_stream)
+
+def get_decoder_layers(model: ModelType):
+    base_model = model.model
+    decoder = base_model.decoder if hasattr(base_model, 'decoder') else base_model
+    return decoder.layers
+
+def set_decoder_layers(model: ModelType, layers):
+    base_model = model.model
+    decoder = base_model.decoder if hasattr(base_model, 'decoder') else base_model
+    decoder.layers = layers
+    return model
+
+def load_assistant(assistant_path: Path, model: ModelType): 
+    config: GPTConfig = None 
+    teacher_hidden_size = None 
+    output_size = None 
+    with open(assistant_path.joinpath('assistant_config.json'), 'r') as cfg_file:
+        data = json.load(cfg_file)
+        config = GPTConfig(**data['model_cfg'])
+        teacher_hidden_size = data['teacher_hidden_size']
+        output_size = data['output_hidden_size']
+
+    assistant_model = GPT2ForLayerPruning(config, teacher_hidden_size, output_size) 
+    state_dict = torch.load(assistant_path.joinpath('assistant_state_dict.pt'))
+    assistant_model.load_state_dict(state_dict)
+    assistant_model.eval()
+
+    hooks = AssistantHooks(assistant_model)
+    decoder = model.model
+    if hasattr(decoder, 'decoder'): decoder = decoder.decoder
+    embedding = decoder.embed_tokens 
+    embedding.register_forward_hook(hooks.set_skip_layers)
+    for idx, layer in enumerate(get_decoder_layers(model)):
+        layer.register_forward_pre_hook(hooks.maybe_skip(idx))

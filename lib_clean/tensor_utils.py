@@ -1,17 +1,15 @@
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 class TensorStorage:
-    token_idx: int = 0
     sample_idx: int = 0
     # First dim = block idx, Second dim = token idx  
-    _cur_sample: List[List[torch.Tensor]] = []
-    _cur_inputs: List[torch.Tensor] = []
+    _cur_sample: Dict[str, List[torch.Tensor]] = dict()
 
     @staticmethod
     @lru_cache(maxsize=500)
@@ -19,18 +17,22 @@ class TensorStorage:
         return torch.load(path)
 
     @staticmethod
-    def _get_path(data_root: Path, sample_idx: int, block_idx: int) -> Path:
+    def _get_path(data_root: Path, module_key: str, sample_idx: int) -> Path:
         # block_idx = -1 for input_ids 
-        block_str = f'block{block_idx}' if block_idx >= 0 else 'inputs'
         return ( 
             data_root
-            .joinpath(block_str)
+            .joinpath(module_key)
             .joinpath(f's{sample_idx}.pt')
         )
 
     @staticmethod
-    def get_embedding(data_root: Path, sample_idx: int, block_idx: int, token_idx: int) -> Optional[torch.Tensor]:
-        path = TensorStorage._get_path(data_root, sample_idx, block_idx)
+    def reset():
+        TensorStorage.sample_idx = 0
+        TensorStorage._cur_sample = dict()
+
+    @staticmethod
+    def get_embedding(data_root: Path, moduke_key: str, sample_idx: int, token_idx: int) -> Optional[torch.Tensor]:
+        path = TensorStorage._get_path(data_root, moduke_key, sample_idx)
         if not path.exists():
             return None 
 
@@ -42,67 +44,50 @@ class TensorStorage:
     
     @staticmethod
     def commit_sample(data_root: Path):
-        path = TensorStorage._get_path(data_root, TensorStorage.sample_idx, -1)
-        path.parent.mkdir(exist_ok=True, parents=True)
-        # dim=0 here because we do unsqueeze(0) when appending 
-        torch.save(torch.cat(TensorStorage._cur_inputs, dim=0), path)
-
-        for block_idx, block in enumerate(TensorStorage._cur_sample):
-            if len(block) == 0:
+        for module_key, embeddings in TensorStorage._cur_sample.items():
+            if len(embeddings) == 0:
                 continue
 
-            path = TensorStorage._get_path(data_root, TensorStorage.sample_idx, block_idx)
+            path = TensorStorage._get_path(data_root, module_key, TensorStorage.sample_idx)
             path.parent.mkdir(exist_ok=True, parents=True)
             # dim=0 here because we do unsqueeze(0) when appending 
-            torch.save(torch.cat(block, dim=0), path)
+            torch.save(torch.cat(embeddings, dim=0), path)
         
-        TensorStorage.token_idx = 0
-        TensorStorage._cur_sample = []
-        TensorStorage._cur_inputs = []
+        TensorStorage._cur_sample = dict()
         TensorStorage.sample_idx += 1
 
     @staticmethod
-    def save_embedding(data: torch.Tensor, block_idx: int):
+    def save_embedding(data: torch.Tensor, module_key: str):
         '''
         Assumes that embeddings arrive sequentially 
         '''
-        if block_idx == 0:
-            TensorStorage.token_idx += 1
-
-        if block_idx <= len(TensorStorage._cur_sample):
-            TensorStorage._cur_sample.append([])
+        if module_key not in TensorStorage._cur_sample: 
+            TensorStorage._cur_sample[module_key] = []
 
         # Do unsqueeze(0) to make sure that the returned tensors are of the same shape as the original hidden states  
-        TensorStorage._cur_sample[block_idx].append(data.cpu().unsqueeze(0))
-    
+        TensorStorage._cur_sample[module_key].append(data.cpu().unsqueeze(0))
+     
     @staticmethod
-    def save_input_ids(input_ids: torch.Tensor):
-        TensorStorage._cur_inputs.append(input_ids.cpu().unsqueeze(0))
-    
-    @staticmethod
-    def get_input_ids(data_root: Path, sample_idx: int, token_idx: int):
-        path = TensorStorage._get_path(data_root, sample_idx, -1)
-        data = TensorStorage._load_tensor(path)
-        return data[token_idx]
-
-    @staticmethod
-    def get_num_tokens(data_root: Path, sample_idx: int):
+    def get_num_tokens(data_root: Path, module_key: str, sample_idx: int):
         # Num tokens should be consistent across blocks 
         # Just load block 0 and return num tokens 
-        sample_data = torch.load(TensorStorage._get_path(data_root, sample_idx, 0))
+        sample_data = torch.load(TensorStorage._get_path(data_root, module_key, sample_idx))
         return sample_data.size(0)
 
-class BlockOutputsDataset(Dataset):
-    def __init__(self, data_root: Path, input_embeddings=True):
+# TODO: Fix this 
+class ModuleOutputsDataset(Dataset):
+    def __init__(self, data_root: Path, module_keys: List[str]):
+        assert len(module_keys) > 0
         self.data_root = data_root 
         self.num_layers = len(list(data_root.iterdir()))
-        self.num_samples = len(list(data_root.joinpath('block0').iterdir()))
+        self.num_samples = len(list(data_root.joinpath(module_keys[0]).iterdir()))
         # Whether to use embeddings or input ids as x 
-        self.input_embeddings = input_embeddings
+        self.module_keys = module_keys 
 
         self.token_prefix = torch.zeros(self.num_samples, dtype=torch.int) 
         for sample_idx in range(self.num_samples):
-            self.token_prefix[sample_idx] = TensorStorage.get_num_tokens(self.data_root, sample_idx)
+            # All modules should have the same length   
+            self.token_prefix[sample_idx] = TensorStorage.get_num_tokens(self.data_root, self.module_keys[0], sample_idx)
             if sample_idx > 0:
                 self.token_prefix[sample_idx] += self.token_prefix[sample_idx - 1]
 
@@ -122,6 +107,12 @@ class BlockOutputsDataset(Dataset):
         sample_idx, sample_offset = self._find_in_prefix(self.token_prefix, index)
         token_idx = index - sample_offset
 
+        return {
+            module_key: TensorStorage.get_embedding(self.data_root, module_key, sample_idx, token_idx) 
+            for module_key in self.module_keys
+        }
+
+        # TODO: Make new dataset class with this 
         block_outputs = torch.stack(tuple(
             self._get_flat_embedding(sample_idx, block_idx, token_idx) 
             for block_idx in range(1, self.num_layers)

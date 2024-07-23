@@ -102,10 +102,12 @@ class CudaTimer:
         for key, running in CudaTimer._is_running.items():
             assert not running, f'{key} still running'
 
-        for key, durations in CudaTimer._comitted_times.items():
-            avg_time = sum(durations) / len(durations)
-            min_time = min(durations)
-            max_time = max(durations)
-            print(f"{key}: Avg = {format_duration_ns(avg_time)}, Min = {format_duration_ns(min_time)}, Max = {format_duration_ns(max_time)}")
+        for key, durations_list in CudaTimer._comitted_times.items():
+            durations = torch.tensor(durations_list)
+            mean, std, min, max = (
+                format_duration_ns(time_ns) for time_ns in 
+                (durations.mean(), durations.std(), durations.min(), durations.max())
+            )
+            print(f"{key}: Avg = {mean} +- {std}, Min = {min}, Max = {max}")
 
         CudaTimer._comitted_times.clear()

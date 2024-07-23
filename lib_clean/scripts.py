@@ -3,15 +3,14 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-from hooks import save_layer_io_hooks, time_execution_hooks
 from tensor_utils import TensorStorage
 from simple_timer import CudaTimer as Timer
-from models import ModelType, get_model
+from models import ModelType, get_model, get_decoder_layers, set_decoder_layers
 
 from pathlib import Path
 
 import torch
-from torch.profiler import profile, record_function, ProfilerActivity
+import torch.nn as nn
 
 from tqdm import tqdm
 from transformers import HfArgumentParser, PreTrainedTokenizer
@@ -48,9 +47,6 @@ def run_once(data, model: ModelType, tokenizer: PreTrainedTokenizer, tokens_per_
         input_ids = tensors.input_ids.to(device)
         attention_mask = tensors.attention_mask.to(device)
 
-        if tensor_storage_dir is not None:
-            TensorStorage.save_input_ids(input_ids)
-
         _ = model.generate(
             input_ids,
             attention_mask=attention_mask,
@@ -69,25 +65,72 @@ def run_once(data, model: ModelType, tokenizer: PreTrainedTokenizer, tokens_per_
         if idx == max_examples:
             break
 
-def get_decoder_layers(model: ModelType):
-    base_model = model.model
-    decoder = base_model.decoder if hasattr(base_model, 'decoder') else base_model
-    return decoder.layers
+def collect_output_hooks(model, collect_modules=None):
+    if collect_modules is None:
+        collect_modules = {'block'}
 
-def set_decoder_layers(model: ModelType, layers):
-    base_model = model.model
-    decoder = base_model.decoder if hasattr(base_model, 'decoder') else base_model
-    decoder.layers = layers
-    return model
+    def save_data(module_key: str, save_hidden_states=False, save_output=False):
+        def save_data_hook(layer: nn.Module, args, kwargs, output):
+            hidden_states = kwargs.get('hidden_states', None)
+            if hidden_states is None:
+                hidden_states = args[0]
+ 
+            num_tokens = hidden_states.size(hidden_states.dim() - 2)
+            if num_tokens != 1:
+                return
 
-def collect_output(model_name: str, output_dir: str):
+            # print(num_tokens, hidden_states.shape)
+            if save_hidden_states:
+                TensorStorage.save_embedding(hidden_states, module_key)
+            if save_output: 
+                if isinstance(output, tuple):
+                    TensorStorage.save_embedding(output[0], module_key)
+                else:
+                    TensorStorage.save_embedding(output, module_key)
+
+        return save_data_hook
+
+    layers = get_decoder_layers(model)
+    for layer_idx, layer in enumerate(layers):
+        if 'block' in collect_modules:
+            layer.register_forward_hook(save_data(f'block{layer_idx}', save_hidden_states=True), with_kwargs=True)
+            if layer_idx == len(layers) - 1:
+                layer.register_forward_hook(save_data(f'block{layer_idx + 1}', save_output=True), with_kwargs=True)
+        if 'attn' in collect_modules:
+            layer_attn_in = layer.temporal_block if hasattr(layer, 'temporal_block') else layer.self_attn 
+            layer_attn_out = layer_attn_in
+            layer_attn_in.register_forward_hook(save_data(f'block{layer_idx}_attn_in', save_hidden_states=True), with_kwargs=True)
+            layer_attn_out.register_forward_hook(save_data(f'block{layer_idx}_attn_out', save_output=True), with_kwargs=True)
+        if 'mlp' in collect_modules:
+            layer_mlp_in, layer_mlp_out = None, None
+            if hasattr(layer, 'mlp_block'):
+                # RecurrentGemma case 
+                layer_mlp_in = layer.mlp_block
+                layer_mlp_out = layer_mlp_in
+            elif hasattr(layer, 'mlp'):
+                # Gated models
+                layer_mlp_in = layer.mlp 
+                layer_mlp_out = layer_mlp_in
+            else:
+                # Opt case 
+                layer_mlp_in = layer.fc1
+                layer_mlp_out = layer.fc2
+    
+            layer_mlp_in.register_forward_hook(save_data(f'block{layer_idx}_mlp_in', save_hidden_states=True), with_kwargs=True)
+            layer_mlp_out.register_forward_hook(save_data(f'block{layer_idx}_mlp_out', save_output=True), with_kwargs=True)
+
+def collect_output(model_name: str, output_dir: str, collect_modules=None):
     data = get_data(100)
     model, tokenizer = get_model(model_name) 
-    save_layer_io_hooks(get_decoder_layers(model))
+    collect_output_hooks(model, collect_modules=collect_modules)
 
     run_once(data, model, tokenizer, tensor_storage_dir=Path(output_dir))
 
 def time_execution(model_name: str):
+    def time_execution_hooks(layer: nn.Module, timer_key: str):
+        layer.register_forward_pre_hook(lambda *args: Timer.register(timer_key))
+        layer.register_forward_hook(lambda *args: Timer.commit(timer_key))
+
     # Benchmarks execution time of different parts of the model 
     warmup_data = get_data(10)
     data = get_data(100)
@@ -122,7 +165,7 @@ def time_execution(model_name: str):
     Timer.print()
 
 
-def benchmark(model_name: str):
+def benchmark(model_name: str, use_cache=True):
     # Benchmark model input ingestion and output generation speed
     assert torch.cuda.is_available()
     device = "cuda"
@@ -201,6 +244,7 @@ def benchmark(model_name: str):
                 top_k=50,
                 top_p=0.95,
                 eos_token_id=tokenizer.eos_token_id,
+                use_cache=use_cache,
             )
             
             num_tokens_to_generate = 256
@@ -212,6 +256,7 @@ def benchmark(model_name: str):
                 top_k=50,
                 top_p=0.95,
                 eos_token_id=tokenizer.eos_token_id,
+                use_cache=use_cache,
             )
             tokens_generated = output.size(1) - n_inputs
             if tokens_generated == num_tokens_to_generate:
