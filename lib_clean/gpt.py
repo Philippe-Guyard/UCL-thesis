@@ -107,12 +107,16 @@ class GPT2ForLayerPruning(nn.Module):
         self.out_head = nn.Linear(config.n_embd, output_size)
         self.blocks = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
     
-    def forward(self, input_embeds):
-        n_tokens = input_embeds.size(0)
+    def forward(self, input_embeds, training=False):
+        # input_embeds: (batch_size, seq_len, hidden_size)
+        n_tokens = input_embeds.size(1)
         block_embed = self.emb_head(input_embeds)
-        block_embed = block_embed.view(1, n_tokens, -1)
 
         for block in self.blocks:
             block_embed = block(block_embed)
         
+        if not training:
+            # Unless required for training, apply the out head only to the last prediction 
+            block_embed = block_embed[:, -1, :]
+
         return self.out_head(block_embed)

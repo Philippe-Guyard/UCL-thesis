@@ -2,10 +2,10 @@ import json
 from pathlib import Path
 from typing import Any, Tuple
 
-import torch
-
 from gpt import GPT2ForLayerPruning, GPTConfig
 
+import torch
+import torch.nn as nn
 from transformers import (
     OPTForCausalLM,
     AutoTokenizer,
@@ -91,39 +91,54 @@ def get_model(model_name: str, **model_kwargs) -> Tuple[ModelType, PreTrainedTok
     
     assert False, 'Unkown base model'
 
-class AssistantHooks:
+class AssistantEvents:
     def __init__(self, model: GPT2ForLayerPruning) -> None:
         self.skip_layers = set()
         self.model = model
         # Perform the computation asynchronously 
         self.compute_stream = torch.cuda.Stream()
         self.compute_event = torch.cuda.Event()
-    
-    def maybe_skip(self, layer_index):
-        def hook(module, args, kwargs):
-            assert not kwargs['output_attentions']
-            assert not kwargs['use_cache']
-            if layer_index == 0:
-                # Wait for the computation to finish before processing the first layer
-                self.compute_event.synchronize()
-            
-            hidden_states = args[0] if len(args) > 0 else kwargs['hidden_states']
-            if layer_index in self.skip_layers:
-                return hidden_states
 
-        return hook
-    
-    def set_skip_layers(self, module, args, kwargs, output):
-        assert not kwargs['output_attentions']
-        assert not kwargs['use_cache']
-        hidden_states = args[0] if len(args) > 0 else kwargs['hidden_states']
-        assert hidden_states.size(0) == 1, 'Batch size > 1 not supported yet'
+    def compute_skip_layers(self, hidden_states):
         # Perform the computation on a separate CUDA stream
         with torch.cuda.stream(self.compute_stream):
             scores = self.model(hidden_states)
-            self.skip_layers = set(torch.topk(scores, 2, largest=False).indices.tolist())
+            self.skip_layers = torch.topk(scores, 2, largest=False).indices
             # Record the event to signal the end of computation
             self.compute_event.record(self.compute_stream)
+    
+class SkippableLayer(nn.Module):
+    def __init__(self, layer: nn.Module, idx: int, assistant_events: AssistantEvents):
+        super().__init__()
+        self.layer = layer
+        self.events = assistant_events
+        self.layer_idx = idx
+    
+    def forward(self, *args, **kwargs):
+        assert not kwargs['output_attentions']
+        assert not kwargs['use_cache']
+        if self.layer_idx == 0:
+            # Wait for the computation to finish before processing the first layer
+            self.events.compute_event.synchronize()
+        
+        if self.layer_idx in self.events.skip_layers:
+            hidden_states = args[0] if len(args) > 0 else kwargs['hidden_states']
+            return (hidden_states,)
+
+        return self.layer(*args, **kwargs)
+
+class EnrichedEmbedding(nn.Module):
+    def __init__(self, emb: nn.Module, assistant_events: AssistantEvents):
+        super().__init__()
+        self.emb = emb
+        self.events = assistant_events
+
+    def forward(self, *args, **kwargs):
+        hidden_states = self.emb(*args, **kwargs)
+        assert hidden_states.size(0) == 1, 'Batch size > 1 not supported yet'
+        self.events.compute_skip_layers(hidden_states)
+        
+        return hidden_states 
 
 def get_decoder_layers(model: ModelType):
     base_model = model.model
@@ -144,17 +159,24 @@ def load_assistant(assistant_path: Path, model: ModelType):
         data = json.load(cfg_file)
         config = GPTConfig(**data['model_cfg'])
         teacher_hidden_size = data['teacher_hidden_size']
-        output_size = data['output_hidden_size']
+        output_size = data['output_size']
 
     assistant_model = GPT2ForLayerPruning(config, teacher_hidden_size, output_size) 
     state_dict = torch.load(assistant_path.joinpath('assistant_state_dict.pt'))
     assistant_model.load_state_dict(state_dict)
     assistant_model.eval()
+    # TODO: Proper device
+    assistant_model = assistant_model.cuda()
 
-    hooks = AssistantHooks(assistant_model)
+    events = AssistantEvents(assistant_model)
     decoder = model.model
     if hasattr(decoder, 'decoder'): decoder = decoder.decoder
     embedding = decoder.embed_tokens 
-    embedding.register_forward_hook(hooks.set_skip_layers)
+    decoder.embed_tokens = EnrichedEmbedding(embedding, events)
+
+    new_layers = []
     for idx, layer in enumerate(get_decoder_layers(model)):
-        layer.register_forward_pre_hook(hooks.maybe_skip(idx))
+        new_layers.append(SkippableLayer(layer, idx, events))
+    
+    set_decoder_layers(model, nn.ModuleList(new_layers))
+        

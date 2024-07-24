@@ -66,7 +66,10 @@ def generate_synthetic_data(batch, device):
         angular_distances = torch.acos(cos_similarities) / torch.pi
         synthetic_outputs.append(angular_distances)
 
-    return torch.stack(synthetic_inputs).to(device), torch.stack(synthetic_outputs).to(device)
+    # Unsqueeze to simulate batch_size = 1 
+    X = torch.stack(synthetic_inputs).unsqueeze(0)
+    y = torch.stack(synthetic_outputs)
+    return X.to(device), y.to(device)
 
 
 wikitext = load_dataset("Salesforce/wikitext", "wikitext-103-v1")
@@ -93,12 +96,12 @@ def measure_val_loss(model, test_loader, criterion):
 
         num_tokens = y.size(0)
         val_len += num_tokens
-        preds = model(X).squeeze()
+        preds = model(X, training=True).squeeze()
         val_loss += criterion(preds, y).item() * num_tokens
     
     return val_loss / val_len
 
-for idx, batch in tqdm(enumerate(train_loader), total=250):
+for idx, batch in tqdm(enumerate(train_loader), total=config.train_size):
     if idx % 50 == 0:
         print(f'Val loss: {measure_val_loss(model, test_loader, criterion):.2e}')
         model.train()
@@ -107,7 +110,7 @@ for idx, batch in tqdm(enumerate(train_loader), total=250):
     if X is None:
         continue
  
-    preds = model(X).squeeze()
+    preds = model(X, training=True).squeeze()
     loss = criterion(y, preds) 
     optim.zero_grad()
     loss.backward()
