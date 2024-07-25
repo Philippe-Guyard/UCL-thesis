@@ -8,6 +8,7 @@ from torch.utils.data import Dataset
 
 class TensorStorage:
     sample_idx: int = 0
+    token_idx: int = 0
     # First dim = block idx, Second dim = token idx  
     _cur_sample: Dict[str, List[torch.Tensor]] = dict()
 
@@ -29,6 +30,7 @@ class TensorStorage:
     def reset():
         TensorStorage.sample_idx = 0
         TensorStorage._cur_sample = dict()
+        TensorStorage.token_idx = 0
 
     @staticmethod
     def get_embedding(data_root: Path, moduke_key: str, sample_idx: int, token_idx: int) -> Optional[torch.Tensor]:
@@ -55,9 +57,10 @@ class TensorStorage:
         
         TensorStorage._cur_sample = dict()
         TensorStorage.sample_idx += 1
+        TensorStorage.token_idx = 0
 
     @staticmethod
-    def save_embedding(data: torch.Tensor, module_key: str):
+    def save_embedding(data: torch.Tensor, module_key: str, last_module=False):
         '''
         Assumes that embeddings arrive sequentially 
         '''
@@ -66,7 +69,9 @@ class TensorStorage:
 
         # Do unsqueeze(0) to make sure that the returned tensors are of the same shape as the original hidden states  
         TensorStorage._cur_sample[module_key].append(data.cpu().unsqueeze(0))
-     
+        if last_module:
+            TensorStorage.token_idx += 1
+ 
     @staticmethod
     def get_num_tokens(data_root: Path, module_key: str, sample_idx: int):
         # Num tokens should be consistent across blocks 

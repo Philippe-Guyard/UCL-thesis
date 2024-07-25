@@ -6,6 +6,8 @@ from gpt import GPT2ForLayerPruning, GPTConfig
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
 from transformers import (
     OPTForCausalLM,
     AutoTokenizer,
@@ -21,6 +23,8 @@ from transformers import (
     RecurrentGemmaConfig,
     RecurrentGemmaForCausalLM
 )
+from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
+from transformers.cache_utils import DynamicCache
 
 from accelerate import PartialState
 
@@ -98,34 +102,139 @@ class AssistantEvents:
         # Perform the computation asynchronously 
         self.compute_stream = torch.cuda.Stream()
         self.compute_event = torch.cuda.Event()
+        self.cache = DynamicCache()
 
     def compute_skip_layers(self, hidden_states):
         # Perform the computation on a separate CUDA stream
         with torch.cuda.stream(self.compute_stream):
-            scores = self.model(hidden_states)
-            self.skip_layers = torch.topk(scores, 2, largest=False).indices
+            scores = self.model(hidden_states, cache=self.cache)
+            self.skip_layers = torch.topk(scores.abs(), 2, largest=False).indices
             # Record the event to signal the end of computation
             self.compute_event.record(self.compute_stream)
     
-class SkippableLayer(nn.Module):
+    def reset_cache(self):
+        self.cache = DynamicCache()
+    
+class SkippableLayerBase(nn.Module):
     def __init__(self, layer: nn.Module, idx: int, assistant_events: AssistantEvents):
         super().__init__()
         self.layer = layer
         self.events = assistant_events
         self.layer_idx = idx
     
+    def skip_forward(self, *args, **kwargs):
+        # hidden_states = args[0] if len(args) > 0 else kwargs['hidden_states']
+        # return (hidden_states,)
+        raise NotImplementedError('Only subclasses of SkippableLayerBase may be skipped')
+        
     def forward(self, *args, **kwargs):
-        assert not kwargs['output_attentions']
-        assert not kwargs['use_cache']
         if self.layer_idx == 0:
             # Wait for the computation to finish before processing the first layer
             self.events.compute_event.synchronize()
         
         if self.layer_idx in self.events.skip_layers:
-            hidden_states = args[0] if len(args) > 0 else kwargs['hidden_states']
-            return (hidden_states,)
+            return self.skip_forward(*args, **kwargs)
+        else:
+            return self.layer(*args, **kwargs)
 
-        return self.layer(*args, **kwargs)
+class LlamaSkippableLayer(SkippableLayerBase):
+    def recompute_cache(self, layer_attn, hidden_states, past_key_value, cache_position, position_ids):
+        # =====================================================
+        # Copied from transformers/models/llama/modeling_llama.py with slight modifications 
+        bsz, q_len, _ = hidden_states.size()
+
+        if layer_attn.config.pretraining_tp > 1:
+            key_value_slicing = (layer_attn.num_key_value_heads * layer_attn.head_dim) // layer_attn.config.pretraining_tp
+            query_slices = layer_attn.q_proj.weight.split(
+                (layer_attn.num_heads * layer_attn.head_dim) // layer_attn.config.pretraining_tp, dim=0
+            )
+            key_slices = layer_attn.k_proj.weight.split(key_value_slicing, dim=0)
+            value_slices = layer_attn.v_proj.weight.split(key_value_slicing, dim=0)
+
+            query_states = [F.linear(hidden_states, query_slices[i]) for i in range(layer_attn.config.pretraining_tp)]
+            query_states = torch.cat(query_states, dim=-1)
+
+            key_states = [F.linear(hidden_states, key_slices[i]) for i in range(layer_attn.config.pretraining_tp)]
+            key_states = torch.cat(key_states, dim=-1)
+
+            value_states = [F.linear(hidden_states, value_slices[i]) for i in range(layer_attn.config.pretraining_tp)]
+            value_states = torch.cat(value_states, dim=-1)
+
+        else:
+            key_states = layer_attn.k_proj(hidden_states)
+            value_states = layer_attn.v_proj(hidden_states)
+
+        key_states = key_states.view(bsz, q_len, layer_attn.num_key_value_heads, layer_attn.head_dim).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, layer_attn.num_key_value_heads, layer_attn.head_dim).transpose(1, 2)
+
+        cos, sin = layer_attn.rotary_emb(value_states, position_ids)
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        # sin and cos are specific to RoPE models; cache_position needed for the static cache
+        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+        key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+    def skip_forward(self, *args, **kwargs):
+        # TODO: Can these computations be done on a separate cuda stream?
+        assert not kwargs['output_attentions']
+        hidden_states = args[0] if len(args) > 0 else kwargs['hidden_states']  
+        past_key_value = kwargs.get('past_key_value', None)
+        if past_key_value is not None: 
+            position_ids = kwargs['position_ids']
+            cache_position = kwargs['cache_position']
+            self.recompute_cache(self.layer.self_attn, hidden_states, past_key_value, cache_position, position_ids)
+        
+        # Second component is optional attention weights 
+        return (hidden_states, None, past_key_value)
+
+class OPTSkippableLayer(SkippableLayerBase):
+    def recompute_cache(self, layer_attn, hidden_states, key_value_states, past_key_value):
+        # =====================================================
+        # Copied from transformers/models/llama/modeling_llama.py with slight modifications 
+        is_cross_attention = key_value_states is not None
+        bsz, tgt_len, _ = hidden_states.size()
+
+        if is_cross_attention and past_key_value is not None:
+            # reuse k,v, cross_attentions
+            key_states = past_key_value[0]
+            value_states = past_key_value[1]
+        elif is_cross_attention:
+            # cross_attentions
+            key_states = layer_attn._shape(layer_attn.k_proj(key_value_states), -1, bsz)
+            value_states = layer_attn._shape(layer_attn.v_proj(key_value_states), -1, bsz)
+        elif past_key_value is not None:
+            # reuse k, v, self_attention
+            key_states = layer_attn._shape(layer_attn.k_proj(hidden_states), -1, bsz)
+            value_states = layer_attn._shape(layer_attn.v_proj(hidden_states), -1, bsz)
+            key_states = torch.cat([past_key_value[0], key_states], dim=2)
+            value_states = torch.cat([past_key_value[1], value_states], dim=2)
+        else:
+            # self_attention
+            key_states = layer_attn._shape(layer_attn.k_proj(hidden_states), -1, bsz)
+            value_states = layer_attn._shape(layer_attn.v_proj(hidden_states), -1, bsz)
+
+        # if cross_attention save Tuple(torch.Tensor, torch.Tensor) of all cross attention key/value_states.
+        # Further calls to cross_attention layer can then reuse all cross-attention
+        # key/value_states (first "if" case)
+        # if uni-directional self-attention (decoder) save Tuple(torch.Tensor, torch.Tensor) of
+        # all previous decoder key/value_states. Further calls to uni-directional self-attention
+        # can concat previous decoder key/value_states to current projected key/value_states (third "elif" case)
+        # if encoder bi-directional self-attention `past_key_value` is always `None`
+        return (key_states, value_states)        
+
+    def skip_forward(self, *args, **kwargs):
+        assert not kwargs['output_attentions']
+        hidden_states = args[0] if len(args) > 0 else kwargs['hidden_states']
+        use_cache = kwargs.get('use_cache', False)
+        past_key_value = kwargs.get('past_key_value', None)
+        outputs = (hidden_states,)
+        if self.layer.self_attn.is_decoder and (use_cache or past_key_value): 
+            key_value_states = kwargs.get('key_value_states', None)
+            new_key_value = self.recompute_cache(self.layer.self_attn, hidden_states, key_value_states, past_key_value)
+            outputs += (new_key_value,)
+        
+        return outputs 
+
 
 class EnrichedEmbedding(nn.Module):
     def __init__(self, emb: nn.Module, assistant_events: AssistantEvents):
@@ -169,6 +278,16 @@ def load_assistant(assistant_path: Path, model: ModelType):
     assistant_model = assistant_model.cuda()
 
     events = AssistantEvents(assistant_model)
+
+    def generate_decorator(f, events: AssistantEvents):
+        def wrapper(*args, **kwargs):
+            events.reset_cache()
+            return f(*args, **kwargs)
+        
+        return wrapper
+    
+    model.generate = generate_decorator(model.generate, events)
+
     decoder = model.model
     if hasattr(decoder, 'decoder'): decoder = decoder.decoder
     embedding = decoder.embed_tokens 
@@ -176,7 +295,7 @@ def load_assistant(assistant_path: Path, model: ModelType):
 
     new_layers = []
     for idx, layer in enumerate(get_decoder_layers(model)):
-        new_layers.append(SkippableLayer(layer, idx, events))
+        new_layers.append(OPTSkippableLayer(layer, idx, events))
     
     set_decoder_layers(model, nn.ModuleList(new_layers))
         

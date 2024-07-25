@@ -65,37 +65,39 @@ def run_once(data, model: ModelType, tokenizer: PreTrainedTokenizer, tokens_per_
         if idx == max_examples:
             break
 
-def collect_output_hooks(model, collect_modules=None):
+def collect_output_hooks(model, collect_modules=None, save_uncached=False):
     if collect_modules is None:
         collect_modules = {'block'}
 
-    def save_data(module_key: str, save_hidden_states=False, save_output=False):
+    def save_data(module_key: str, save_hidden_states=False, save_output=False, 
+                  save_cached=True, save_uncached=False,
+                  is_last_module=False):
         def save_data_hook(layer: nn.Module, args, kwargs, output):
-            hidden_states = kwargs.get('hidden_states', None)
-            if hidden_states is None:
-                hidden_states = args[0]
- 
-            num_tokens = hidden_states.size(hidden_states.dim() - 2)
-            if num_tokens != 1:
+            hidden_states = args[0] if len(args) > 0 else kwargs['hidden_states']
+            is_first_token = TensorStorage.token_idx == 0
+            if (is_first_token and not save_uncached) or (not is_first_token and not save_cached):
                 return
+            
+            save_key = module_key
+            if is_first_token:
+                save_key += '_first'
 
-            # print(num_tokens, hidden_states.shape)
+            emb = None 
             if save_hidden_states:
-                TensorStorage.save_embedding(hidden_states, module_key)
+                emb = hidden_states
             if save_output: 
-                if isinstance(output, tuple):
-                    TensorStorage.save_embedding(output[0], module_key)
-                else:
-                    TensorStorage.save_embedding(output, module_key)
+                emb = output[0] if isinstance(output, tuple) else output
+
+            TensorStorage.save_embedding(emb, save_key, last_module=is_last_module)
 
         return save_data_hook
 
     layers = get_decoder_layers(model)
     for layer_idx, layer in enumerate(layers):
         if 'block' in collect_modules:
-            layer.register_forward_hook(save_data(f'block{layer_idx}', save_hidden_states=True), with_kwargs=True)
+            layer.register_forward_hook(save_data(f'block{layer_idx}', save_hidden_states=True, save_uncached=save_uncached), with_kwargs=True)
             if layer_idx == len(layers) - 1:
-                layer.register_forward_hook(save_data(f'block{layer_idx + 1}', save_output=True), with_kwargs=True)
+                layer.register_forward_hook(save_data(f'block{layer_idx + 1}', save_output=True, save_uncached=save_uncached, is_last_module=True), with_kwargs=True)
         if 'attn' in collect_modules:
             layer_attn_in = layer.temporal_block if hasattr(layer, 'temporal_block') else layer.self_attn 
             layer_attn_out = layer_attn_in

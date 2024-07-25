@@ -2,7 +2,7 @@ from dataclasses import dataclass, asdict
 import json
 from pathlib import Path
 
-from models import get_model
+from models import get_model, get_decoder_layers
 from scripts import collect_output_hooks
 from tensor_utils import TensorStorage
 from gpt import GPT2ForLayerPruning, GPTConfig
@@ -22,18 +22,21 @@ class AssistantConfig:
     n_layer: int 
     n_head: int 
     n_embd: int
-    train_size: int = 250
+    train_size: int = 500
     test_size: int = 50
-    log_size: int = 50
+    log_size: int = 100
 
 config: AssistantConfig = HfArgumentParser(AssistantConfig).parse_args_into_dataclasses()[0]
 teacher_model, teacher_tokenizer = get_model(config.teacher_model)
-collect_output_hooks(teacher_model)
+n_blocks = len(get_decoder_layers(teacher_model))
+collect_output_hooks(teacher_model, save_uncached=True)
 # teacher_model = teacher_model.cuda()
 teacher_model.eval()
 
 @torch.no_grad
 def generate_synthetic_data(batch, device):
+    # Make sure we are operating with a clean dataset
+    TensorStorage.reset()
     tokens = teacher_tokenizer(batch['text'], return_tensors='pt')
     output = teacher_model.generate(
         tokens.input_ids.cuda(),
@@ -48,13 +51,23 @@ def generate_synthetic_data(batch, device):
     if tokens_generated < 2:
         return None, None 
 
-    n_blocks = len(TensorStorage._cur_sample) - 1
     synthetic_inputs = []
     synthetic_outputs = []
-    # The first token is not saved as use_cache is False 
+    # Handle the first token separately as use_cache is False
+    synthetic_inputs.append(
+        # Squeeze the batch size of 1
+        TensorStorage._cur_sample['block0_first'][0].squeeze()
+    )
+    block_outputs = torch.stack([
+        TensorStorage._cur_sample[f'block{block_idx}_first'][0].squeeze()
+        for block_idx in range(1, n_blocks + 1)
+    ])
+    cos_similarities = F.cosine_similarity(block_outputs[:-1], block_outputs[1:], dim=-1).transpose(0, 1)
+    cos_similarities = torch.clamp(cos_similarities, -1.0, 1.0)
+    synthetic_outputs.append(torch.acos(cos_similarities) / torch.pi)
     for token_idx in range(tokens_generated - 1):
         synthetic_inputs.append(
-            TensorStorage._cur_sample['block0'][token_idx].view(-1)
+            TensorStorage._cur_sample['block0'][token_idx].view(1, -1)
         )
 
         block_outputs = torch.stack([
@@ -64,17 +77,22 @@ def generate_synthetic_data(batch, device):
         cos_similarities = F.cosine_similarity(block_outputs[:-1], block_outputs[1:])    
         cos_similarities = torch.clamp(cos_similarities, -1.0, 1.0) 
         angular_distances = torch.acos(cos_similarities) / torch.pi
-        synthetic_outputs.append(angular_distances)
+        synthetic_outputs.append(angular_distances.unsqueeze(0))
 
     # Unsqueeze to simulate batch_size = 1 
-    X = torch.stack(synthetic_inputs).unsqueeze(0)
-    y = torch.stack(synthetic_outputs)
+    X = torch.cat(synthetic_inputs, dim=0).unsqueeze(0)
+    y = torch.cat(synthetic_outputs, dim=0)
     return X.to(device), y.to(device)
 
 
 wikitext = load_dataset("Salesforce/wikitext", "wikitext-103-v1")
-train_loader = DataLoader(wikitext['train'].select(range(config.train_size)), batch_size=1, shuffle=True)
-test_loader = DataLoader(wikitext['test'].select(range(config.test_size)), batch_size=1, shuffle=False)
+def filter_nonempty_select(data, final_size):
+    return data.select(range(10 * final_size)).filter(lambda x: len(x['text']) > 0).select(range(final_size))
+
+train_loader = DataLoader(filter_nonempty_select(wikitext['train'], config.train_size), batch_size=1, shuffle=True)
+test_loader  = DataLoader(filter_nonempty_select(wikitext['test'] , config.test_size) , batch_size=1, shuffle=False)
+# train_loader = DataLoader(wikitext['train'].select(range(config.train_size)), batch_size=1, shuffle=True)
+# test_loader  = DataLoader(wikitext['test'].select(range(config.test_size)) , batch_size=1, shuffle=False)
 
 cfg = GPTConfig(n_layer=config.n_layer, n_head=config.n_head, n_embd=config.n_embd)
 model = GPT2ForLayerPruning(cfg, teacher_model.config.hidden_size, teacher_model.config.num_hidden_layers - 1).cuda()
@@ -102,7 +120,7 @@ def measure_val_loss(model, test_loader, criterion):
     return val_loss / val_len
 
 for idx, batch in tqdm(enumerate(train_loader), total=config.train_size):
-    if idx % 50 == 0:
+    if idx % config.log_size == 0:
         print(f'Val loss: {measure_val_loss(model, test_loader, criterion):.2e}')
         model.train()
 
