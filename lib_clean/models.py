@@ -68,9 +68,14 @@ def get_basemodel_name(model_name: str, depth=0):
     base_name = model_name
     if model_is_local:
         config_path = Path(model_name, 'config.json')
+        name_field = '_name_or_path'
+        if not config_path.exists():
+            config_path = Path(model_name, 'adapter_config.json')
+            name_field = 'base_model_name_or_path'
+
         with open(config_path) as config_file:
             cfg = json.load(config_file)
-            base_name = cfg['_name_or_path']  
+            base_name = cfg[name_field]  
 
     if is_local_model_name(base_name):
         base_name = get_basemodel_name(base_name, depth + 1)
