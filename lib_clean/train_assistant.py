@@ -94,7 +94,7 @@ test_loader  = DataLoader(filter_nonempty_select(wikitext['test'] , config.test_
 # train_loader = DataLoader(wikitext['train'].select(range(config.train_size)), batch_size=1, shuffle=True)
 # test_loader  = DataLoader(wikitext['test'].select(range(config.test_size)) , batch_size=1, shuffle=False)
 
-cfg = GPTConfig(n_layer=config.n_layer, n_head=config.n_head, n_embd=config.n_embd)
+cfg = GPTConfig(n_layer=config.n_layer, n_head=config.n_head, n_embd=config.n_embd, bias=False, dropout=0.15)
 model = GPT2ForLayerPruning(cfg, teacher_model.config.hidden_size, teacher_model.config.num_hidden_layers - 1).cuda()
 
 optim = torch.optim.AdamW(model.parameters())
@@ -119,10 +119,15 @@ def measure_val_loss(model, test_loader, criterion):
     
     return val_loss / val_len
 
+model.train()
+running_train_loss = 0
+running_train_len = 0
 for idx, batch in tqdm(enumerate(train_loader), total=config.train_size):
-    if idx % config.log_size == 0:
-        print(f'Val loss: {measure_val_loss(model, test_loader, criterion):.2e}')
+    if (idx + 1) % config.log_size == 0:
+        print(f'Train loss: {running_train_loss / running_train_len:.2e}, Val loss: {measure_val_loss(model, test_loader, criterion):.2e}')
         model.train()
+        running_train_loss = 0
+        running_train_len = 0
 
     X, y = generate_synthetic_data(batch, 'cuda')
     if X is None:
@@ -130,6 +135,11 @@ for idx, batch in tqdm(enumerate(train_loader), total=config.train_size):
  
     preds = model(X, training=True).squeeze()
     loss = criterion(y, preds) 
+
+    num_tokens = y.size(0)
+    running_train_len += num_tokens
+    running_train_loss += loss.item()
+
     optim.zero_grad()
     loss.backward()
     optim.step()
@@ -139,6 +149,8 @@ assistant_out.mkdir(exist_ok=True, parents=True)
 
 torch.save(model.state_dict(), assistant_out.joinpath('assistant_state_dict.pt'))
 with open(assistant_out.joinpath('assistant_config.json'), 'w') as cfg_file:
+    # Good for training, no sense in saving it for later
+    cfg.dropout = 0
     json.dump({
         'teacher_model': config.teacher_model,
         'model_cfg': asdict(cfg),
