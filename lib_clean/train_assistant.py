@@ -94,10 +94,12 @@ test_loader  = DataLoader(filter_nonempty_select(wikitext['test'] , config.test_
 # train_loader = DataLoader(wikitext['train'].select(range(config.train_size)), batch_size=1, shuffle=True)
 # test_loader  = DataLoader(wikitext['test'].select(range(config.test_size)) , batch_size=1, shuffle=False)
 
-cfg = GPTConfig(n_layer=config.n_layer, n_head=config.n_head, n_embd=config.n_embd, bias=False, dropout=0.15)
+dropout = 0.1
+weight_decay = 1e-1 
+lr = 6e-4
+cfg = GPTConfig(n_layer=config.n_layer, n_head=config.n_head, n_embd=config.n_embd, bias=False, dropout=dropout)
 model = GPT2ForLayerPruning(cfg, teacher_model.config.hidden_size, teacher_model.config.num_hidden_layers - 1).cuda()
-
-optim = torch.optim.AdamW(model.parameters())
+optim = model.configure_optimizers(weight_decay, lr, 'cuda')
 criterion = torch.nn.MSELoss()
 
 from tqdm import tqdm
