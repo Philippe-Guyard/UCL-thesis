@@ -46,7 +46,8 @@ def get_dataset(name: str, train_size: int, eval_size: int, seed: int):
     elif name == 'smolcorpus':
         corpus = load_dataset('HuggingFaceTB/smollm-corpus', 'cosmopedia-v2', streaming=True)
         train_dataset = corpus['train'].map(tokenize_function, remove_columns='text')
-        test_dataset  = corpus['test'].map(tokenize_function, remove_columns='text')
+        # test_dataset  = corpus['test'].map(tokenize_function, remove_columns='text')
+        test_dataset = None # This has no test set 
     else:
         slimpajama = load_from_disk(name)
         train_dataset = to_tokenized_dataset(slimpajama, train_size, seed)
@@ -103,6 +104,8 @@ if config.mixed_precision:
     bf16 = torch.cuda.is_bf16_supported()
 
 root_folder = Path(f'runs/{config.run_name}')
+# This is needed to specify max_steps, since smollm-corpus does not implement len() for some reason
+examples_per_step = config.gradient_accumulation_steps * config.train_batch_size
 training_args = TrainingArguments(
     # Misc
     output_dir=root_folder.joinpath("checkpoints"),
@@ -121,6 +124,7 @@ training_args = TrainingArguments(
     per_device_eval_batch_size=config.eval_batch_size,
 	gradient_accumulation_steps=config.gradient_accumulation_steps,
     warmup_steps=config.warmup_steps,
+    max_steps=config.train_size // examples_per_step + 1,
     max_grad_norm=1,
     weight_decay=0.1,
     adam_beta1=0.9,
