@@ -5,7 +5,7 @@ from typing import Optional
 
 from tensor_utils import TensorStorage
 from simple_timer import CudaTimer as Timer
-from models import ModelType, get_model, get_decoder_layers, set_decoder_layers
+from models import ModelType, get_model, get_decoder_layers, get_token_embedding, set_decoder_layers
 
 from pathlib import Path
 
@@ -91,6 +91,10 @@ def collect_output_hooks(model, collect_modules=None, save_uncached=False):
             TensorStorage.save_embedding(emb, save_key, last_module=is_last_module)
 
         return save_data_hook
+
+    if 'token_embedding' in collect_modules:
+        emb = get_token_embedding(model)
+        emb.register_forward_hook(save_data('token_embedding', save_output=True, save_hidden_states=False, save_uncached=save_uncached), with_kwargs=True)
 
     layers = get_decoder_layers(model)
     for layer_idx, layer in enumerate(layers):

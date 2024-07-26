@@ -265,6 +265,19 @@ def set_decoder_layers(model: ModelType, layers):
     decoder.layers = layers
     return model
 
+def get_decoder(model: ModelType):
+    decoder = model.model
+    if hasattr(decoder, 'decoder'): decoder = decoder.decoder
+    return decoder
+
+def get_token_embedding(model: ModelType) -> nn.Module:
+    decoder = get_decoder(model)
+    return decoder.embed_tokens 
+
+def set_token_embedding(model: ModelType, emb: nn.Embedding):
+    decoder = get_decoder(model)
+    decoder.embed_tokens = emb
+
 def load_assistant(assistant_path: Path, model: ModelType): 
     config: GPTConfig = None 
     teacher_hidden_size = None 
@@ -293,10 +306,8 @@ def load_assistant(assistant_path: Path, model: ModelType):
     
     model.generate = generate_decorator(model.generate, events)
 
-    decoder = model.model
-    if hasattr(decoder, 'decoder'): decoder = decoder.decoder
-    embedding = decoder.embed_tokens 
-    decoder.embed_tokens = EnrichedEmbedding(embedding, events)
+    embedding = get_token_embedding(model)
+    set_token_embedding(EnrichedEmbedding(embedding, events))
 
     new_layers = []
     for idx, layer in enumerate(get_decoder_layers(model)):

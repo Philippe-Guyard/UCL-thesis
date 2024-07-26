@@ -1,5 +1,6 @@
 # ==============================================
 # Mostly borrowed from https://github.com/karpathy/nanoGPT/blob/master/model.py
+# And transformers modeling_llama.py 
 
 import inspect
 import math
@@ -11,6 +12,61 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 from transformers.cache_utils import Cache
+
+class RoPE(nn.Module):
+    def __init__(self, dim, max_position_embeddings=2048, base=10000, device='cuda', scaling_factor=1.0):
+        super().__init__()
+        self.scaling_factor = scaling_factor
+        self.dim = dim
+        self.max_position_embeddings = max_position_embeddings
+        self.base = base
+        inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, dtype=torch.int64).float().to(device) / self.dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        # For BC we register cos and sin cached
+        self.max_seq_len_cached = max_position_embeddings
+
+    @torch.no_grad()
+    def forward(self, x, position_ids):
+        # x: [bs, num_attention_heads, seq_len, head_size]
+        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+        position_ids_expanded = position_ids[:, None, :].float()
+        freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos = emb.cos()
+        sin = emb.sin()
+        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+    """Applies Rotary Position Embedding to the query and key tensors.
+
+    Args:
+        q (`torch.Tensor`): The query tensor.
+        k (`torch.Tensor`): The key tensor.
+        cos (`torch.Tensor`): The cosine part of the rotary embedding.
+        sin (`torch.Tensor`): The sine part of the rotary embedding.
+        position_ids (`torch.Tensor`, *optional*):
+            Deprecated and unused.
+        unsqueeze_dim (`int`, *optional*, defaults to 1):
+            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
+            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
+            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
+            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
+            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
+            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
+    Returns:
+        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
+    """
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -38,6 +94,9 @@ class CausalSelfAttention(nn.Module):
         self.n_embd = config.n_embd
         self.dropout = config.dropout
         self.layer_index = layer_idx
+        assert self.n_embd % self.n_head == 0
+        self.head_dim = self.n_embd // self.n_head
+        self.rotary_emb = RoPE(self.head_dim, config.block_size)
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash:
@@ -46,16 +105,23 @@ class CausalSelfAttention(nn.Module):
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
 
-    def forward(self, x, cache: Optional[Cache]=None):
+    def forward(self, x, position_ids: Optional[torch.LongTensor]=None, cache: Optional[Cache]=None):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs) 
-        if cache is not None: 
-            k, v = cache.update(k, v, self.layer_index)
+        k = k.view(B, T, self.n_head, self.head_dim).transpose(1, 2) # (B, nh, T, hs)
+        q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2) # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2) # (B, nh, T, hs) 
+
+        # Apply RoPE 
+        cos, sin = self.rotary_emb(v, position_ids)
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+
+        if cache is not None:
+            # sin and cos are specific to RoPE models
+            cache_kwargs = {"sin": sin, "cos": cos}
+            key_states, value_states = cache.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
@@ -98,8 +164,8 @@ class Block(nn.Module):
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
-    def forward(self, x, cache: Optional[Cache]=None):
-        x = x + self.attn(self.ln_1(x), cache=cache)
+    def forward(self, x, position_ids: Optional[torch.LongTensor]=None, cache: Optional[Cache]=None):
+        x = x + self.attn(self.ln_1(x), cache=cache, position_ids=position_ids)
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -110,21 +176,31 @@ class GPTConfig:
     n_embd: int
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    block_size: int = 2048
+
 
 class GPT2ForLayerPruning(nn.Module):
-    # TODO: Positional encoding ? 
     def __init__(self, config: GPTConfig, teacher_hidden_size: int, output_size: int):
         super().__init__()
         self.emb_head = nn.Linear(teacher_hidden_size, config.n_embd)
+
         self.out_head = nn.Linear(config.n_embd, output_size)
         self.blocks = nn.ModuleList([Block(config, idx) for idx in range(config.n_layer)])
     
     def forward(self, input_embeds, training=False, cache: Optional[Cache]=None):
         # input_embeds: (batch_size, seq_len, hidden_size)
         block_embed = self.emb_head(input_embeds)
+        if cache is None or cache.get_seq_length() == 0:
+            seq_len = input_embeds.size(1)
+            position_ids = torch.arange(0, seq_len, dtype=torch.long)
+        else:
+            position_ids = torch.tensor([cache.get_seq_length()], dtype=torch.long)
+        
+        batch_size = input_embeds.size(0)
+        position_ids = position_ids.unsqueeze(0).expand(batch_size, -1).cuda()
 
         for block in self.blocks:
-            block_embed = block(block_embed, cache=cache)
+            block_embed = block(block_embed, cache=cache, position_ids=position_ids)
         
         if not training:
             # Unless required for training, apply the out head only to the last prediction 
