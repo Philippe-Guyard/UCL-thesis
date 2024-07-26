@@ -92,6 +92,7 @@ def get_model(model_name: str, **model_kwargs) -> Tuple[ModelType, PreTrainedTok
         ('llama', get_gated_model),
         ('recurrentgemma', get_recurrent_gemma),
         ('gemma', get_gated_model),
+        ('smollm', get_gated_model),
     ] 
 
     for key, func in getters_map:
