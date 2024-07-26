@@ -24,14 +24,14 @@ def get_trainable_model(model_name: str) -> Tuple[LlamaForCausalLM, LlamaTokeniz
     assert tokenizer.pad_token_id is not None
     return model, tokenizer
 
-def to_tokenized_dataset(dataset: Dataset, num_samples: int, shuffle_seed=42):
-    def tokenize_function(examples):
-        tokenized_inputs = tokenizer(
-            examples["text"], truncation=True, padding="max_length", max_length=1024
-        )
-        tokenized_inputs["labels"] = tokenized_inputs["input_ids"].copy()
-        return tokenized_inputs
+def tokenize_function(examples):
+    tokenized_inputs = tokenizer(
+        examples["text"], truncation=True, padding="max_length", max_length=1024
+    )
+    tokenized_inputs["labels"] = tokenized_inputs["input_ids"].copy()
+    return tokenized_inputs
 
+def to_tokenized_dataset(dataset: Dataset, num_samples: int, shuffle_seed=42):
     return (
         dataset.shuffle(seed=shuffle_seed)
         .select(range(num_samples))
@@ -43,6 +43,10 @@ def get_dataset(name: str, train_size: int, eval_size: int, seed: int):
         wikitext = load_dataset("Salesforce/wikitext", "wikitext-103-v1")
         train_dataset = to_tokenized_dataset(wikitext["train"], train_size, seed)
         test_dataset = to_tokenized_dataset(wikitext["test"], eval_size, seed)
+    elif name == 'smolcorpus':
+        corpus = load_dataset('HuggingFaceTB/smollm-corpus', 'cosmopedia-v2', streaming=True)
+        train_dataset = corpus['train'].map(tokenize_function, remove_columns='text')
+        test_dataset  = corpus['test'].map(tokenize_function, remove_columns='text')
     else:
         slimpajama = load_from_disk(name)
         train_dataset = to_tokenized_dataset(slimpajama, train_size, seed)
