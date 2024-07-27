@@ -252,6 +252,8 @@ def benchmark(model_name: str, use_cache=True):
                 eos_token_id=tokenizer.eos_token_id,
                 use_cache=use_cache,
             )
+            # Does this help give more stable results?
+            torch.cuda.empty_cache()
             
             num_tokens_to_generate = 256
             output = model.generate(
@@ -264,6 +266,7 @@ def benchmark(model_name: str, use_cache=True):
                 eos_token_id=tokenizer.eos_token_id,
                 use_cache=use_cache,
             )
+            torch.cuda.empty_cache()
             tokens_generated = output.size(1) - n_inputs
             if tokens_generated == num_tokens_to_generate:
                 output_speeds.append(sum(output_buffer) / len(output_buffer))
