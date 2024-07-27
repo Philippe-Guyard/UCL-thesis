@@ -1,6 +1,7 @@
 from dataclasses import dataclass, asdict
 import json
 from pathlib import Path
+from typing import Literal, Optional
 
 from models import get_model, get_decoder_layers
 from scripts import collect_output_hooks
@@ -17,6 +18,12 @@ from transformers import HfArgumentParser
 
 import wandb
 
+@dataclass
+class TrainingObjective:
+    objective: Literal['regression', 'classification'] = 'regression'
+    angular_dist_threshold: Optional[float] = None
+    cos_sim_threshold: Optional[float] = None 
+
 @dataclass 
 class AssistantConfig:
     run_name: str
@@ -31,7 +38,7 @@ class AssistantConfig:
     log_size: int = 100
 
 
-config: AssistantConfig = HfArgumentParser(AssistantConfig).parse_args_into_dataclasses()[0]
+config, objective_config = HfArgumentParser((AssistantConfig, TrainingObjective)).parse_args_into_dataclasses()
 wandb.init(project='UCL thesis', name=config.run_name)
 teacher_model, teacher_tokenizer = get_model(config.teacher_model)
 n_blocks = len(get_decoder_layers(teacher_model))
@@ -43,7 +50,8 @@ teacher_model.eval()
 def generate_synthetic_data(batch, device):
     # Make sure we are operating with a clean dataset
     TensorStorage.reset()
-    tokens = teacher_tokenizer(batch['text'], return_tensors='pt', )
+    # No padding since we have a batch size of 1, but truncate inputs that are too long 
+    tokens = teacher_tokenizer(batch['text'], return_tensors='pt', max_length=2048, truncation=True, padding=False)
     output = teacher_model.generate(
         tokens.input_ids.cuda(),
         attention_mask=tokens.attention_mask.cuda(),
@@ -83,7 +91,18 @@ def generate_synthetic_data(batch, device):
         cos_similarities = F.cosine_similarity(block_outputs[:-1], block_outputs[1:])    
         cos_similarities = torch.clamp(cos_similarities, -1.0, 1.0) 
         angular_distances = torch.acos(cos_similarities) / torch.pi
-        synthetic_outputs.append(angular_distances.unsqueeze(0))
+        outs = None 
+        if objective_config.objective == 'regression':
+            outs = angular_distances
+        else:
+            angular_thresh = objective_config.angular_dist_threshold
+            if angular_thresh is None:
+                cos_sim_thresh = torch.tensor(objective_config.cos_sim_threshold)
+                angular_thresh = torch.acos(cos_sim_thresh) / torch.pi
+
+            outs = angular_distances <= angular_thresh
+
+        synthetic_outputs.append(outs.unsqueeze(0))
 
     # Unsqueeze to simulate batch_size = 1 
     X = torch.cat(synthetic_inputs, dim=0).unsqueeze(0)
@@ -106,7 +125,7 @@ lr = 6e-4
 cfg = GPTConfig(n_layer=config.n_layer, n_head=config.n_head, n_embd=config.n_embd, bias=False, dropout=dropout)
 model = GPT2ForLayerPruning(cfg, teacher_model.config.hidden_size, teacher_model.config.num_hidden_layers).cuda()
 optim = model.configure_optimizers(weight_decay, lr, 'cuda')
-criterion = torch.nn.MSELoss()
+criterion = torch.nn.MSELoss() if objective_config.objective == 'regression' else torch.nn.BCEWithLogitsLoss(reduction='mean')
 
 from tqdm import tqdm
 
@@ -149,7 +168,7 @@ for idx, batch in tqdm(enumerate(train_loader), total=config.train_size):
         continue
  
     preds = model(X, training=True).squeeze()
-    loss = criterion(y, preds) 
+    loss = criterion(preds, y) 
 
     num_tokens = y.size(0)
     running_train_len += num_tokens
