@@ -109,6 +109,19 @@ def generate_synthetic_data(batch, device):
     y = torch.cat(synthetic_outputs, dim=0)
     return X.to(device), y.to(device)
 
+def approximate_class_weight(loader, sample_size):
+    assert objective_config.objective == 'classification'
+    weights = torch.zeros(n_blocks)
+    for N, batch in enumerate(loader):
+        _, y = generate_synthetic_data(batch, 'cpu')
+        batch_weights = y.mean(dim=0)
+        # Simple averaging
+        weights -= 1. / (N + 1) * (weights - batch_weights)
+
+        if N >= sample_size:
+            break
+
+    return weights
 
 wikitext = load_dataset("Salesforce/wikitext", "wikitext-103-v1")
 def filter_nonempty_select(data, final_size):
@@ -119,13 +132,31 @@ test_loader  = DataLoader(filter_nonempty_select(wikitext['test'] , config.test_
 # train_loader = DataLoader(wikitext['train'].select(range(config.train_size)), batch_size=1, shuffle=True)
 # test_loader  = DataLoader(wikitext['test'].select(range(config.test_size)) , batch_size=1, shuffle=False)
 
+def get_criterion():
+    if objective_config.objective == 'regression':
+        return torch.nn.MSELoss()
+    else:
+        pos_weights = approximate_class_weight(train_loader, 50)
+        print(f'Found approximate pos weights: {pos_weights}')
+        criterions = [torch.nn.BCEWithLogitsLoss(pos_weight=pw, reduction='sum') for pw in pos_weights]
+        def new_bce_loss_with_logits(preds, targets):
+            # Use sum here to avoid gradient gets propagated
+            total_loss = sum( 
+                criterions[i](preds[:, i], targets[:, i]) 
+                for i in range(len(criterions))
+            )
+
+            return total_loss / targets.numel()
+
+        return new_bce_loss_with_logits
+
 dropout = 0.1
 weight_decay = 1e-1 
 lr = 6e-4
 cfg = GPTConfig(n_layer=config.n_layer, n_head=config.n_head, n_embd=config.n_embd, bias=False, dropout=dropout)
 model = GPT2ForLayerPruning(cfg, teacher_model.config.hidden_size, teacher_model.config.num_hidden_layers).cuda()
 optim = model.configure_optimizers(weight_decay, lr, 'cuda')
-criterion = torch.nn.MSELoss() if objective_config.objective == 'regression' else torch.nn.BCEWithLogitsLoss(reduction='mean')
+criterion = get_criterion()
 
 from tqdm import tqdm
 
@@ -169,6 +200,7 @@ for idx, batch in tqdm(enumerate(train_loader), total=config.train_size):
  
     preds = model(X, training=True).squeeze()
     loss = criterion(preds, y) 
+    print(loss.item())
 
     num_tokens = y.size(0)
     running_train_len += num_tokens
