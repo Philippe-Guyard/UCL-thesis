@@ -121,7 +121,12 @@ def approximate_class_weight(loader, sample_size):
         if N >= sample_size:
             break
 
-    return weights
+    # weights is the mean = proportion of ones
+    # We need pos_weight * proportion of ones = proportion of zeros 
+    # pos_weight * weights = (1 - weights) 
+    # pos_weight = (1 - weights) / weights
+    pos_weights = (1 - weights) / weights
+    return pos_weights
 
 wikitext = load_dataset("Salesforce/wikitext", "wikitext-103-v1")
 def filter_nonempty_select(data, final_size):
