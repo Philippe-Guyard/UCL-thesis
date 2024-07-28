@@ -200,7 +200,6 @@ for idx, batch in tqdm(enumerate(train_loader), total=config.train_size):
  
     preds = model(X, training=True).squeeze()
     loss = criterion(preds, y) 
-    print(loss.item())
 
     num_tokens = y.size(0)
     running_train_len += num_tokens
