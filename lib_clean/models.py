@@ -114,11 +114,13 @@ class AssistantEvents:
         # Perform the computation on a separate CUDA stream
         with torch.cuda.stream(self.compute_stream):
             scores = self.model(hidden_states, cache=self.cache)
-            self.skip_layers = torch.topk(scores.abs(), 2, largest=False).indices
+            # TODO: Change this hardcoded value 
+            self.skip_layers = torch.topk(scores.abs(), 4, largest=False).indices
             # Record the event to signal the end of computation
             self.compute_event.record(self.compute_stream)
     
     def reset_cache(self):
+        del self.cache
         self.cache = DynamicCache()
     
 class SkippableLayerBase(nn.Module):
@@ -243,7 +245,7 @@ class OPTSkippableLayer(SkippableLayerBase):
 
 
 class EnrichedEmbedding(nn.Module):
-    def __init__(self, emb: nn.Module, assistant_events: AssistantEvents):
+    def __init__(self, emb: nn.Embedding, assistant_events: AssistantEvents):
         super().__init__()
         self.emb = emb
         self.events = assistant_events
@@ -254,6 +256,17 @@ class EnrichedEmbedding(nn.Module):
         self.events.compute_skip_layers(hidden_states)
         
         return hidden_states 
+
+    def __getattr__(self, name: str):
+        if name in ('emb', 'events', 'forward'):
+            return object.__getattribute__(self, name)
+        return getattr(self.emb, name)
+
+    def __setattr__(self, name: str, value):
+        if name in ('emb', 'events', 'forward'):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self.emb, name, value)
 
 def get_decoder_layers(model: ModelType):
     base_model = model.model
@@ -271,7 +284,7 @@ def get_decoder(model: ModelType):
     if hasattr(decoder, 'decoder'): decoder = decoder.decoder
     return decoder
 
-def get_token_embedding(model: ModelType) -> nn.Module:
+def get_token_embedding(model: ModelType) -> nn.Embedding:
     decoder = get_decoder(model)
     return decoder.embed_tokens 
 
@@ -279,7 +292,8 @@ def set_token_embedding(model: ModelType, emb: nn.Embedding):
     decoder = get_decoder(model)
     decoder.embed_tokens = emb
 
-def load_assistant(assistant_path: Path, model: ModelType): 
+def load_assistant(assistant_path: Path, model: ModelType, model_basename: str): 
+    print(f'Loading assistant at {assistant_path}')
     config: GPTConfig = None 
     teacher_hidden_size = None 
     output_size = None 
@@ -296,6 +310,9 @@ def load_assistant(assistant_path: Path, model: ModelType):
     # TODO: Proper device
     assistant_model = assistant_model.cuda()
 
+    embedding = get_token_embedding(model)
+    # In case we are doing mixed precision inference
+    assistant_model = assistant_model.to(dtype=embedding.weight.dtype)
     events = AssistantEvents(assistant_model)
 
     def generate_decorator(f, events: AssistantEvents):
@@ -307,12 +324,16 @@ def load_assistant(assistant_path: Path, model: ModelType):
     
     model.generate = generate_decorator(model.generate, events)
 
-    embedding = get_token_embedding(model)
-    set_token_embedding(EnrichedEmbedding(embedding, events))
+    set_token_embedding(model, EnrichedEmbedding(embedding, events))
 
     new_layers = []
     for idx, layer in enumerate(get_decoder_layers(model)):
-        new_layers.append(OPTSkippableLayer(layer, idx, events))
+        if 'llama' in model_basename:
+            new_layers.append(LlamaSkippableLayer(layer, idx, events))
+        elif 'opt' in model_basename:
+            new_layers.append(OPTSkippableLayer(layer, idx, events))
+        else:
+            assert False, 'unknown model basename'
     
     set_decoder_layers(model, nn.ModuleList(new_layers))
         

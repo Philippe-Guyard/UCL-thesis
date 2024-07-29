@@ -5,7 +5,7 @@ from typing import Optional
 
 from tensor_utils import TensorStorage
 from simple_timer import CudaTimer as Timer
-from models import ModelType, get_model, get_decoder_layers, get_token_embedding, set_decoder_layers
+from models import ModelType, get_basemodel_name, get_model, get_decoder_layers, get_token_embedding, load_assistant, set_decoder_layers
 
 from pathlib import Path
 
@@ -171,7 +171,7 @@ def time_execution(model_name: str):
     Timer.print()
 
 
-def benchmark(model_name: str, use_cache=True):
+def benchmark(model_name: str, assistant_name: Optional[str]=None, use_cache=True):
     # Benchmark model input ingestion and output generation speed
     assert torch.cuda.is_available()
     device = "cuda"
@@ -180,6 +180,9 @@ def benchmark(model_name: str, use_cache=True):
     model.generation_config.pad_token_id = tokenizer.eos_token_id 
     model.eval()
     model = model.to(device)
+    if assistant_name is not None:
+        load_assistant(Path(assistant_name), model, get_basemodel_name(model_name))
+
     def count_tokens(tokenizer):
         def f(example):
             return {'num_tokens': len(tokenizer.tokenize(example['text']))}
