@@ -167,11 +167,12 @@ class LlamaSkippableLayer(SkippableLayerBase):
 
             value_states = [F.linear(hidden_states, value_slices[i]) for i in range(layer_attn.config.pretraining_tp)]
             value_states = torch.cat(value_states, dim=-1)
-
         else:
+            query_states = layer_attn.q_proj(hidden_states)
             key_states = layer_attn.k_proj(hidden_states)
             value_states = layer_attn.v_proj(hidden_states)
 
+        query_states = query_states.view(bsz, q_len, layer_attn.num_key_value_heads, layer_attn.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, layer_attn.num_key_value_heads, layer_attn.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, layer_attn.num_key_value_heads, layer_attn.head_dim).transpose(1, 2)
 
