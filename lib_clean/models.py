@@ -294,6 +294,7 @@ def set_token_embedding(model: ModelType, emb: nn.Embedding):
 
 def load_assistant(assistant_path: Path, model: ModelType, model_basename: str): 
     print(f'Loading assistant at {assistant_path}')
+    model_basename = model_basename.lower()
     config: GPTConfig = None 
     teacher_hidden_size = None 
     output_size = None 

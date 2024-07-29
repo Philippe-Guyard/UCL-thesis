@@ -121,7 +121,7 @@ class CausalSelfAttention(nn.Module):
         if cache is not None:
             # sin and cos are specific to RoPE models
             cache_kwargs = {"sin": sin, "cos": cos}
-            key_states, value_states = cache.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            k, v = cache.update(k, v, self.layer_index, cache_kwargs)
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
