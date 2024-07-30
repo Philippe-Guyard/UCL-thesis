@@ -181,7 +181,7 @@ def benchmark(model_name: str, assistant_name: Optional[str]=None, use_cache=Tru
     model.eval()
     model = model.to(device)
     if assistant_name is not None:
-        load_assistant(Path(assistant_name), model, get_basemodel_name(model_name))
+        load_assistant(Path(assistant_name), model, get_basemodel_name(model_name), assistant_use_cache=use_cache)
 
     def count_tokens(tokenizer):
         def f(example):

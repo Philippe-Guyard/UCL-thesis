@@ -35,7 +35,8 @@ class AssistedHFLM(models.huggingface.HFLM):
     def _create_model(self, *args, **kwargs):
         result = super()._create_model(*args, **kwargs)
         if self.assistant_name is not None:
-            load_assistant(Path(self.assistant_name), self._model, model_basename=get_basemodel_name(self.pretrained))
+            # No cache for assistant because lm_eval does not use model.generate, so it becomes unclear when to reset it 
+            load_assistant(Path(self.assistant_name), self._model, model_basename=get_basemodel_name(self.pretrained), assistant_use_cache=False)
 
         return result
 

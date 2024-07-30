@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 from typing import Any, Tuple
+import warnings
 
 from gpt import GPT2ForLayerPruning, GPTConfig
 
@@ -102,17 +103,18 @@ def get_model(model_name: str, **model_kwargs) -> Tuple[ModelType, PreTrainedTok
     assert False, 'Unkown base model'
 
 class AssistantEvents:
-    def __init__(self, model: GPT2ForLayerPruning) -> None:
+    def __init__(self, model: GPT2ForLayerPruning, use_cache: bool) -> None:
         self.skip_layers = set()
         self.model = model
         # Perform the computation asynchronously 
         self.compute_stream = torch.cuda.Stream()
         self.compute_event = torch.cuda.Event()
-        self.cache = DynamicCache()
+        self.cache = DynamicCache() if use_cache else None
 
     def compute_skip_layers(self, hidden_states):
         # Perform the computation on a separate CUDA stream
         with torch.cuda.stream(self.compute_stream):
+            # NOTE: self.cache is None when use_cache=True
             scores = self.model(hidden_states, cache=self.cache)
             # TODO: Change this hardcoded value 
             # Need to move them to cpu and convert to set for much faster access 
@@ -124,8 +126,11 @@ class AssistantEvents:
             self.compute_event.record(self.compute_stream)
     
     def reset_cache(self):
-        del self.cache
-        self.cache = DynamicCache()
+        if self.cache is not None:
+            del self.cache
+            self.cache = DynamicCache()
+        else:
+            warnings.warn('Attempting to reset cache on assistant with use_cache=True')
     
 class SkippableLayerBase(nn.Module):
     def __init__(self, layer: nn.Module, idx: int, assistant_events: AssistantEvents):
@@ -300,7 +305,7 @@ def set_token_embedding(model: ModelType, emb: nn.Embedding):
     decoder = get_decoder(model)
     decoder.embed_tokens = emb
 
-def load_assistant(assistant_path: Path, model: ModelType, model_basename: str): 
+def load_assistant(assistant_path: Path, model: ModelType, model_basename: str, assistant_use_cache=True): 
     print(f'Loading assistant at {assistant_path}')
     model_basename = model_basename.lower()
     config: GPTConfig = None 
@@ -322,7 +327,7 @@ def load_assistant(assistant_path: Path, model: ModelType, model_basename: str):
     embedding = get_token_embedding(model)
     # In case we are doing mixed precision inference
     assistant_model = assistant_model.to(dtype=embedding.weight.dtype)
-    events = AssistantEvents(assistant_model)
+    events = AssistantEvents(assistant_model, use_cache=assistant_use_cache)
 
     def generate_decorator(f, events: AssistantEvents):
         def wrapper(*args, **kwargs):
