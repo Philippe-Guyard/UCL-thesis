@@ -172,7 +172,7 @@ class LlamaSkippableLayer(SkippableLayerBase):
             key_states = layer_attn.k_proj(hidden_states)
             value_states = layer_attn.v_proj(hidden_states)
 
-        query_states = query_states.view(bsz, q_len, layer_attn.num_key_value_heads, layer_attn.head_dim).transpose(1, 2)
+        query_states = query_states.view(bsz, q_len, layer_attn.num_heads, layer_attn.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, layer_attn.num_key_value_heads, layer_attn.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, layer_attn.num_key_value_heads, layer_attn.head_dim).transpose(1, 2)
 
@@ -182,19 +182,22 @@ class LlamaSkippableLayer(SkippableLayerBase):
         # sin and cos are specific to RoPE models; cache_position needed for the static cache
         cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
         key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+        return past_key_value
 
     def skip_forward(self, *args, **kwargs):
         # TODO: Can these computations be done on a separate cuda stream?
         assert not kwargs['output_attentions']
         hidden_states = args[0] if len(args) > 0 else kwargs['hidden_states']  
         past_key_value = kwargs.get('past_key_value', None)
+        outputs = (hidden_states,)
         if past_key_value is not None: 
             position_ids = kwargs['position_ids']
             cache_position = kwargs['cache_position']
-            self.recompute_cache(self.layer.self_attn, hidden_states, past_key_value, cache_position, position_ids)
+            past_key_value = self.recompute_cache(self.layer.self_attn, hidden_states, past_key_value, cache_position, position_ids)
+            outputs += (past_key_value)
         
-        # Second component is optional attention weights 
-        return (hidden_states, None, past_key_value)
+        return outputs
+
 
 class OPTSkippableLayer(SkippableLayerBase):
     def recompute_cache(self, layer_attn, hidden_states, key_value_states, past_key_value):
