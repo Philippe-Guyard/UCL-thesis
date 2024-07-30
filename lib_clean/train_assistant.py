@@ -37,6 +37,77 @@ class AssistantConfig:
     test_size: int = 50
     log_size: int = 100
 
+class MetricTracker:
+    def __init__(self, objective: Literal['classification', 'regression'], criterion):
+        self.criterion = criterion
+        self.objective = objective 
+        self.reset()
+
+    def reset(self):
+        self.running_loss = 0
+        self.running_tokens = 0
+        if self.objective == 'classification':
+            self.TP = torch.zeros(12).cuda()
+            self.FP = torch.zeros(12).cuda()
+            self.FN = torch.zeros(12).cuda()
+            self.total_samples = 0
+            self.correct_samples = 0
+
+    @torch.no_grad
+    def update(self, y_true, y_pred):
+        """
+        Update the metrics with new batch of data.
+
+        Parameters:
+        y_true (torch.Tensor): Ground truth labels, shape (batch_size, 12)
+        y_pred (torch.Tensor): Predicted labels, shape (batch_size, 12)
+        """
+        # Ensure the tensors are of the same shape
+        assert y_true.shape == y_pred.shape, "Shape of y_true and y_pred must match"
+        
+        num_tokens = y_true.size(0)
+        self.running_tokens += num_tokens
+        self.running_loss += self.criterion(y_pred, y_true).item() * num_tokens
+
+        if self.objective == 'classification':
+            # Binarize predictions (assuming predictions are probabilities or logits)
+            y_pred = (y_pred >= 0.5).float()
+
+            # Update counts for True Positives (TP), False Positives (FP), False Negatives (FN)
+            self.TP += (y_true * y_pred).sum(dim=0)
+            self.FP += ((1 - y_true) * y_pred).sum(dim=0)
+            self.FN += (y_true * (1 - y_pred)).sum(dim=0)
+
+            # Update counts for accuracy
+            self.correct_samples += (y_true == y_pred).float().sum().item()
+            self.total_samples += y_true.numel()
+
+    def _compute_metrics_classification(self):
+        """
+        Compute precision, recall, F1-score, and accuracy.
+
+        Returns:
+        dict: Dictionary containing precision, recall, F1-score, and accuracy
+        """
+
+        precision = self.TP / (self.TP + self.FP + 1e-8)
+        recall = self.TP / (self.TP + self.FN + 1e-8)
+        f1_score = 2 * (precision * recall) / (precision + recall + 1e-8)
+        accuracy = self.correct_samples / self.total_samples
+
+        return {
+            "precision": precision.mean().item(),
+            "recall": recall.mean().item(),
+            "f1_score": f1_score.mean().item(),
+            "accuracy": accuracy
+        }
+
+    def compute_metrics(self):
+        metrics = {'loss': self.running_loss / self.running_tokens}
+        if self.objective == 'classification':
+            metrics.update(self._compute_metrics_classification())
+        
+        return metrics
 
 config, objective_config = HfArgumentParser((AssistantConfig, TrainingObjective)).parse_args_into_dataclasses()
 wandb.init(project='UCL thesis', name=config.run_name)
@@ -141,19 +212,20 @@ def get_criterion():
     if objective_config.objective == 'regression':
         return torch.nn.MSELoss()
     else:
-        pos_weights = approximate_class_weight(train_loader, 50)
+        pos_weights = approximate_class_weight(train_loader, 50).cuda()
         print(f'Found approximate pos weights: {pos_weights}')
-        criterions = [torch.nn.BCEWithLogitsLoss(pos_weight=pw, reduction='sum') for pw in pos_weights]
-        def new_bce_loss_with_logits(preds, targets):
-            # Use sum here to avoid gradient gets propagated
-            total_loss = sum( 
-                criterions[i](preds[:, i], targets[:, i]) 
-                for i in range(len(criterions))
-            )
+        return torch.nn.BCEWithLogitsLoss(pos_weight=pos_weights)
+        # criterions = [torch.nn.BCEWithLogitsLoss(pos_weight=pw, reduction='sum') for pw in pos_weights]
+        # def new_bce_loss_with_logits(preds, targets):
+        #     # Use sum here to avoid gradient gets propagated
+        #     total_loss = sum( 
+        #         criterions[i](preds[:, i], targets[:, i]) 
+        #         for i in range(len(criterions))
+        #     )
 
-            return total_loss / targets.numel()
+        #     return total_loss / targets.numel()
 
-        return new_bce_loss_with_logits
+        # return new_bce_loss_with_logits
 
 dropout = 0.1
 weight_decay = 1e-1 
@@ -166,50 +238,48 @@ criterion = get_criterion()
 from tqdm import tqdm
 
 @torch.no_grad()
-def measure_val_loss(model, test_loader, criterion):
+def compute_val_metrics(model, test_loader, criterion):
     model.eval()
-    val_loss = 0
-    val_len = 0
+    metric_tracker = MetricTracker(objective_config.objective, criterion) 
     for batch in test_loader:
         X, y = generate_synthetic_data(batch, 'cuda')
         if X is None:
             continue
 
-        num_tokens = y.size(0)
-        val_len += num_tokens
         preds = model(X, training=True).squeeze()
-        val_loss += criterion(preds, y).item() * num_tokens
+        metric_tracker.update(y, preds)
     
-    return val_loss / val_len
+    return metric_tracker.compute_metrics() 
 
 model.train()
-running_train_loss = 0
-running_train_len = 0
 total_num_tokens = 0
 optim.zero_grad()
 
+train_tracker = MetricTracker(objective_config.objective, criterion)
+
 for idx, batch in tqdm(enumerate(train_loader), total=config.train_size):
     if (idx + 1) % config.log_size == 0:
-        wandb.log({
-            'train_loss': running_train_loss / running_train_len,
-            'val_loss': measure_val_loss(model, test_loader, criterion)
-        }, step=idx)
-        # print(f'Train loss: {running_train_loss / running_train_len:.2e}, Val loss: {measure_val_loss(model, test_loader, criterion):.2e}')
+        train_metrics = {
+            f'train_{metric}': value 
+            for metric, value in train_tracker.compute_metrics().items() 
+        }
+        val_metrics = {
+            f'val_{metric}': value 
+            for metric, value in compute_val_metrics(model, test_loader, criterion).items()
+        }
+        # NOTE: Maybe no need to require python 3.9 for just that line...  
+        wandb.log(train_metrics | val_metrics, step=idx)
         model.train()
-        running_train_loss = 0
-        running_train_len = 0
+        train_tracker.reset()
 
     X, y = generate_synthetic_data(batch, 'cuda')
     if X is None:
         continue
  
     preds = model(X, training=True).squeeze()
+    train_tracker.update(y, preds)
     loss = criterion(preds, y) 
-
-    num_tokens = y.size(0)
-    running_train_len += num_tokens
-    running_train_loss += loss.item() * num_tokens
-    total_num_tokens += num_tokens
+    total_num_tokens += y.size(0)
 
     loss.backward()
     wandb.log({
@@ -233,5 +303,5 @@ with open(assistant_out.joinpath('assistant_config.json'), 'w') as cfg_file:
         'teacher_model': config.teacher_model,
         'model_cfg': asdict(cfg),
         'teacher_hidden_size': teacher_model.config.hidden_size,
-        'output_size': teacher_model.config.num_hidden_layers - 1
+        'output_size': n_blocks 
     }, cfg_file)
