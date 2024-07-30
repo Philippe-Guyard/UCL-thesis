@@ -23,6 +23,7 @@ class TrainingObjective:
     objective: Literal['regression', 'classification'] = 'regression'
     angular_dist_threshold: Optional[float] = None
     cos_sim_threshold: Optional[float] = None 
+    weight_estimation_steps: int = 50
 
 @dataclass 
 class AssistantConfig:
@@ -38,18 +39,19 @@ class AssistantConfig:
     log_size: int = 100
 
 class MetricTracker:
-    def __init__(self, objective: Literal['classification', 'regression'], criterion):
+    def __init__(self, objective: Literal['classification', 'regression'], criterion, n_blocks: int):
         self.criterion = criterion
         self.objective = objective 
+        self.n_blocks = n_blocks
         self.reset()
 
     def reset(self):
         self.running_loss = 0
         self.running_tokens = 0
         if self.objective == 'classification':
-            self.TP = torch.zeros(12).cuda()
-            self.FP = torch.zeros(12).cuda()
-            self.FN = torch.zeros(12).cuda()
+            self.TP = torch.zeros(self.n_blocks).cuda()
+            self.FP = torch.zeros(self.n_blocks).cuda()
+            self.FN = torch.zeros(self.n_blocks).cuda()
             self.total_samples = 0
             self.correct_samples = 0
 
@@ -212,7 +214,7 @@ def get_criterion():
     if objective_config.objective == 'regression':
         return torch.nn.MSELoss()
     else:
-        pos_weights = approximate_class_weight(train_loader, 50).cuda()
+        pos_weights = approximate_class_weight(train_loader, objective_config.weight_estimation_steps).cuda()
         print(f'Found approximate pos weights: {pos_weights}')
         return torch.nn.BCEWithLogitsLoss(pos_weight=pos_weights)
         # criterions = [torch.nn.BCEWithLogitsLoss(pos_weight=pw, reduction='sum') for pw in pos_weights]
@@ -240,7 +242,7 @@ from tqdm import tqdm
 @torch.no_grad()
 def compute_val_metrics(model, test_loader, criterion):
     model.eval()
-    metric_tracker = MetricTracker(objective_config.objective, criterion) 
+    metric_tracker = MetricTracker(objective_config.objective, criterion, n_blocks) 
     for batch in test_loader:
         X, y = generate_synthetic_data(batch, 'cuda')
         if X is None:
@@ -255,7 +257,7 @@ model.train()
 total_num_tokens = 0
 optim.zero_grad()
 
-train_tracker = MetricTracker(objective_config.objective, criterion)
+train_tracker = MetricTracker(objective_config.objective, criterion, n_blocks)
 
 for idx, batch in tqdm(enumerate(train_loader), total=config.train_size):
     if (idx + 1) % config.log_size == 0:
