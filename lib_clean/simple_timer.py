@@ -24,6 +24,13 @@ def format_duration_ns(nanoseconds):
 
     return f"{value:.1f}{suffix}"
 
+def print_durations_summary(key, durations_list: List):
+    durations = torch.tensor(durations_list, dtype=torch.float32)
+    mean, std, min, max = (
+        format_duration_ns(time_ns) for time_ns in 
+        (durations.mean(), durations.std(), durations.min(), durations.max())
+    )
+    print(f"{key}: Avg = {mean} +- {std}, Min = {min}, Max = {max}")
 
 class Timer:
     # All times are in ns
@@ -50,13 +57,8 @@ class Timer:
     def print():
         """Print the average, min and max of every commited time"""
         assert len(Timer._start_times) == 0
-        for key, durations in Timer._comitted_times.items():
-            avg_time = sum(durations) / len(durations)
-            min_time = min(durations)
-            max_time = max(durations)
-            print(
-                f"{key}: Avg = {format_duration_ns(avg_time)}, Min = {format_duration_ns(min_time)}, Max = {format_duration_ns(max_time)}"
-            )
+        for key, durations_list in Timer._comitted_times.items():
+            print_durations_summary(key, durations_list)
 
         Timer._comitted_times.clear()
 
@@ -103,11 +105,6 @@ class CudaTimer:
             assert not running, f'{key} still running'
 
         for key, durations_list in CudaTimer._comitted_times.items():
-            durations = torch.tensor(durations_list)
-            mean, std, min, max = (
-                format_duration_ns(time_ns) for time_ns in 
-                (durations.mean(), durations.std(), durations.min(), durations.max())
-            )
-            print(f"{key}: Avg = {mean} +- {std}, Min = {min}, Max = {max}")
+            print_durations_summary(key, durations_list)
 
         CudaTimer._comitted_times.clear()

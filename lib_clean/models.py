@@ -115,7 +115,11 @@ class AssistantEvents:
         with torch.cuda.stream(self.compute_stream):
             scores = self.model(hidden_states, cache=self.cache)
             # TODO: Change this hardcoded value 
-            self.skip_layers = torch.topk(scores.abs(), 4, largest=False).indices
+            # Need to move them to cpu and convert to set for much faster access 
+            # (to check layer_idx in skip_layers)
+            skip_indices = torch.topk(scores.abs(), 4, largest=False).indices.squeeze()
+            self.skip_layers = set(skip_indices.cpu().numpy())
+            
             # Record the event to signal the end of computation
             self.compute_event.record(self.compute_stream)
     
