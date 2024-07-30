@@ -194,7 +194,7 @@ class LlamaSkippableLayer(SkippableLayerBase):
             position_ids = kwargs['position_ids']
             cache_position = kwargs['cache_position']
             past_key_value = self.recompute_cache(self.layer.self_attn, hidden_states, past_key_value, cache_position, position_ids)
-            outputs += (past_key_value)
+            outputs += (past_key_value,)
         
         return outputs
 
