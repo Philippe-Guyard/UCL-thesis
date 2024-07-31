@@ -154,32 +154,19 @@ class SkippableLayerBase(nn.Module):
         else:
             return self.layer(*args, **kwargs)
 
-class LlamaSkippableLayer(SkippableLayerBase):
+class RoPEModelSkippableLayer(SkippableLayerBase):
+    def eval_qkvproj(self, layer_attn, hidden_states):
+        query_states = layer_attn.q_proj(hidden_states)
+        key_states = layer_attn.k_proj(hidden_states)
+        value_states = layer_attn.v_proj(hidden_states)
+        return query_states, key_states, value_states
+
     def recompute_cache(self, layer_attn, hidden_states, past_key_value, cache_position, position_ids):
         # =====================================================
         # Copied from transformers/models/llama/modeling_llama.py with slight modifications 
         bsz, q_len, _ = hidden_states.size()
 
-        if layer_attn.config.pretraining_tp > 1:
-            key_value_slicing = (layer_attn.num_key_value_heads * layer_attn.head_dim) // layer_attn.config.pretraining_tp
-            query_slices = layer_attn.q_proj.weight.split(
-                (layer_attn.num_heads * layer_attn.head_dim) // layer_attn.config.pretraining_tp, dim=0
-            )
-            key_slices = layer_attn.k_proj.weight.split(key_value_slicing, dim=0)
-            value_slices = layer_attn.v_proj.weight.split(key_value_slicing, dim=0)
-
-            query_states = [F.linear(hidden_states, query_slices[i]) for i in range(layer_attn.config.pretraining_tp)]
-            query_states = torch.cat(query_states, dim=-1)
-
-            key_states = [F.linear(hidden_states, key_slices[i]) for i in range(layer_attn.config.pretraining_tp)]
-            key_states = torch.cat(key_states, dim=-1)
-
-            value_states = [F.linear(hidden_states, value_slices[i]) for i in range(layer_attn.config.pretraining_tp)]
-            value_states = torch.cat(value_states, dim=-1)
-        else:
-            query_states = layer_attn.q_proj(hidden_states)
-            key_states = layer_attn.k_proj(hidden_states)
-            value_states = layer_attn.v_proj(hidden_states)
+        query_states, key_states, value_states = self.eval_qkvproj(layer_attn, hidden_states)
 
         query_states = query_states.view(bsz, q_len, layer_attn.num_heads, layer_attn.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, layer_attn.num_key_value_heads, layer_attn.head_dim).transpose(1, 2)
@@ -206,6 +193,31 @@ class LlamaSkippableLayer(SkippableLayerBase):
             outputs += (past_key_value,)
         
         return outputs
+
+class LlamaSkippableLayer(RoPEModelSkippableLayer):
+    def eval_qkvproj(self, layer_attn, hidden_states):
+        # =====================================================
+        # Copied from transformers/models/llama/modeling_llama.py with slight modifications 
+        if layer_attn.config.pretraining_tp > 1:
+            key_value_slicing = (layer_attn.num_key_value_heads * layer_attn.head_dim) // layer_attn.config.pretraining_tp
+            query_slices = layer_attn.q_proj.weight.split(
+                (layer_attn.num_heads * layer_attn.head_dim) // layer_attn.config.pretraining_tp, dim=0
+            )
+            key_slices = layer_attn.k_proj.weight.split(key_value_slicing, dim=0)
+            value_slices = layer_attn.v_proj.weight.split(key_value_slicing, dim=0)
+
+            query_states = [F.linear(hidden_states, query_slices[i]) for i in range(layer_attn.config.pretraining_tp)]
+            query_states = torch.cat(query_states, dim=-1)
+
+            key_states = [F.linear(hidden_states, key_slices[i]) for i in range(layer_attn.config.pretraining_tp)]
+            key_states = torch.cat(key_states, dim=-1)
+
+            value_states = [F.linear(hidden_states, value_slices[i]) for i in range(layer_attn.config.pretraining_tp)]
+            value_states = torch.cat(value_states, dim=-1)
+        else:
+           query_states, key_states, value_states = super().evalqkvproj(layer_attn, hidden_states) 
+    
+        return query_states, key_states, value_states
 
 
 class OPTSkippableLayer(SkippableLayerBase):
@@ -306,6 +318,11 @@ def set_token_embedding(model: ModelType, emb: nn.Embedding):
     decoder.embed_tokens = emb
 
 def load_assistant(assistant_path: Path, model: ModelType, model_basename: str, assistant_use_cache=True): 
+    # It is unclear when to reset the assistant cache. For usage that just includes calling model.generate,
+    # we can just overwrite the .generate method to reset the assistant cache together with the main model cache 
+    # For libraries like lm-eval, the .forward method is sometimes called directly, and hence it is unclear when to use 
+    # assistant cache and when to reset it. To avoid this any overly complicated solutions, we just leave it as a simple 
+    # boolean flag here. The assistant overhead is in any case small enough for us to simply ignore it 
     print(f'Loading assistant at {assistant_path}')
     model_basename = model_basename.lower()
     config: GPTConfig = None 
@@ -346,6 +363,8 @@ def load_assistant(assistant_path: Path, model: ModelType, model_basename: str, 
             new_layers.append(LlamaSkippableLayer(layer, idx, events))
         elif 'opt' in model_basename:
             new_layers.append(OPTSkippableLayer(layer, idx, events))
+        elif 'gemma' in model_basename or 'qwen2' in model_basename:
+            new_layers.append(RoPEModelSkippableLayer(layer, idx, events))
         else:
             assert False, 'unknown model basename'
     
