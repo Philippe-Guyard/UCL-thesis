@@ -114,6 +114,8 @@ class MetricTracker:
 config, objective_config = HfArgumentParser((AssistantConfig, TrainingObjective)).parse_args_into_dataclasses()
 wandb.init(project='UCL thesis', name=config.run_name)
 teacher_model, teacher_tokenizer = get_model(config.teacher_model)
+# Needed to avoid warnings from qwen2
+teacher_model.generation_config.pad_token_id = teacher_tokenizer.eos_token_id
 n_blocks = len(get_decoder_layers(teacher_model))
 collect_output_hooks(teacher_model, save_uncached=True, collect_modules={'block', 'token_embedding'})
 # teacher_model = teacher_model.cuda()
