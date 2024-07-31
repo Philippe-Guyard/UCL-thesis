@@ -329,7 +329,6 @@ for idx, batch in tqdm(enumerate(train_loader), total=config.train_size):
             for metric, value in compute_val_metrics(model, test_loader, criterion).items()
         }
         wandb_message = train_metrics | val_metrics
-        print(wandb_message)
         # NOTE: Maybe no need to require python 3.9 for just that line...  
         wandb.log(wandb_message, step=idx)
         model.train()
