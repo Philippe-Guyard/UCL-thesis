@@ -1,6 +1,7 @@
+from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Any, Tuple
+from typing import Any, Optional, Tuple
 import warnings
 
 from gpt import GPT2ForLayerPruning, GPTConfig
@@ -102,24 +103,37 @@ def get_model(model_name: str, **model_kwargs) -> Tuple[ModelType, PreTrainedTok
     
     assert False, 'Unkown base model'
 
+@dataclass
+class AssistanceConfig:
+    assistant_name: Optional[str] = None
+    # Always prune n layers
+    prune_nlayers: Optional[int] = None
+    # Prune all layers that are less than distance
+    prune_ndist: Optional[float] = None
+
 class AssistantEvents:
-    def __init__(self, model: GPT2ForLayerPruning, use_cache: bool) -> None:
+    def __init__(self, model: GPT2ForLayerPruning, config: AssistanceConfig, use_cache: bool) -> None:
         self.skip_layers = set()
         self.model = model
         # Perform the computation asynchronously 
         self.compute_stream = torch.cuda.Stream()
         self.compute_event = torch.cuda.Event()
+        self.config = config
         self.cache = DynamicCache() if use_cache else None
 
     def compute_skip_layers(self, hidden_states):
         # Perform the computation on a separate CUDA stream
         with torch.cuda.stream(self.compute_stream):
-            # NOTE: self.cache is None when use_cache=True
-            scores = self.model(hidden_states, cache=self.cache)
-            # TODO: Change this hardcoded value 
+            # NOTE: self.cache is None when use_cache=False, so safe to pass
+            scores = self.model(hidden_states, cache=self.cache).squeeze().abs()
             # Need to move them to cpu and convert to set for much faster access 
             # (to check layer_idx in skip_layers)
-            skip_indices = torch.topk(scores.abs(), 4, largest=False).indices.squeeze()
+            if self.config.prune_nlayers is not None:
+                skip_indices = torch.topk(scores, self.config.prune_nlayers, largest=False)
+                skip_indices = skip_indices.indices
+            else:
+                skip_indices = torch.nonzero(scores < self.config.prune_ndist)
+
             self.skip_layers = set(skip_indices.cpu().numpy())
             
             # Record the event to signal the end of computation
@@ -188,7 +202,7 @@ class RoPEModelSkippableLayer(SkippableLayerBase):
         outputs = (hidden_states,)
         if past_key_value is not None: 
             position_ids = kwargs['position_ids']
-            cache_position = kwargs['cache_position']
+            cache_position = kwargs.get('cache_position', None)
             past_key_value = self.recompute_cache(self.layer.self_attn, hidden_states, past_key_value, cache_position, position_ids)
             outputs += (past_key_value,)
         
@@ -215,7 +229,7 @@ class LlamaSkippableLayer(RoPEModelSkippableLayer):
             value_states = [F.linear(hidden_states, value_slices[i]) for i in range(layer_attn.config.pretraining_tp)]
             value_states = torch.cat(value_states, dim=-1)
         else:
-           query_states, key_states, value_states = super().evalqkvproj(layer_attn, hidden_states) 
+           query_states, key_states, value_states = super().eval_qkvproj(layer_attn, hidden_states) 
     
         return query_states, key_states, value_states
 
@@ -317,12 +331,15 @@ def set_token_embedding(model: ModelType, emb: nn.Embedding):
     decoder = get_decoder(model)
     decoder.embed_tokens = emb
 
-def load_assistant(assistant_path: Path, model: ModelType, model_basename: str, assistant_use_cache=True): 
+def load_assistant(assistant_config: AssistanceConfig, model: ModelType, model_basename: str, assistant_use_cache=True): 
     # It is unclear when to reset the assistant cache. For usage that just includes calling model.generate,
     # we can just overwrite the .generate method to reset the assistant cache together with the main model cache 
     # For libraries like lm-eval, the .forward method is sometimes called directly, and hence it is unclear when to use 
     # assistant cache and when to reset it. To avoid this any overly complicated solutions, we just leave it as a simple 
     # boolean flag here. The assistant overhead is in any case small enough for us to simply ignore it 
+    assert assistant_config.prune_ndist or assistant_config.prune_nlayers
+
+    assistant_path = Path(assistant_config.assistant_name)
     print(f'Loading assistant at {assistant_path}')
     model_basename = model_basename.lower()
     config: GPTConfig = None 
@@ -344,7 +361,7 @@ def load_assistant(assistant_path: Path, model: ModelType, model_basename: str, 
     embedding = get_token_embedding(model)
     # In case we are doing mixed precision inference
     assistant_model = assistant_model.to(dtype=embedding.weight.dtype)
-    events = AssistantEvents(assistant_model, use_cache=assistant_use_cache)
+    events = AssistantEvents(assistant_model, assistant_config, use_cache=assistant_use_cache)
 
     def generate_decorator(f, events: AssistantEvents):
         def wrapper(*args, **kwargs):

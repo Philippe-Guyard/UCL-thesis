@@ -5,7 +5,7 @@ from typing import Optional
 
 from tensor_utils import TensorStorage
 from simple_timer import CudaTimer as Timer
-from models import ModelType, get_basemodel_name, get_model, get_decoder_layers, get_token_embedding, load_assistant, set_decoder_layers
+from models import AssistanceConfig, ModelType, get_basemodel_name, get_model, get_decoder_layers, get_token_embedding, load_assistant, set_decoder_layers
 
 from pathlib import Path
 
@@ -171,7 +171,7 @@ def time_execution(model_name: str):
     Timer.print()
 
 
-def benchmark(model_name: str, assistant_name: Optional[str]=None, use_cache=True):
+def benchmark(model_name: str, assistance_config: AssistanceConfig, use_cache=True):
     # Benchmark model input ingestion and output generation speed
     assert torch.cuda.is_available()
     device = "cuda"
@@ -180,8 +180,8 @@ def benchmark(model_name: str, assistant_name: Optional[str]=None, use_cache=Tru
     model.generation_config.pad_token_id = tokenizer.eos_token_id 
     model.eval()
     model = model.to(device)
-    if assistant_name is not None:
-        load_assistant(Path(assistant_name), model, get_basemodel_name(model_name), assistant_use_cache=use_cache)
+    if assistance_config.assistant_name is not None:
+        load_assistant(assistance_config, model, get_basemodel_name(model_name), assistant_use_cache=use_cache)
 
     def count_tokens(tokenizer):
         def f(example):
@@ -288,13 +288,13 @@ def benchmark(model_name: str, assistant_name: Optional[str]=None, use_cache=Tru
     ) 
 
 if __name__ == '__main__':
-    config: MainConfig = HfArgumentParser(MainConfig).parse_args_into_dataclasses()[0]
+    config, assistance_config = HfArgumentParser((MainConfig, AssistanceConfig)).parse_args_into_dataclasses()
     if config.time_execution:
         time_execution(config.model_name)
     if config.collect_output:
         assert config.output_dir is not None 
         collect_output(config.model_name, config.output_dir)
     if config.benchmark:
-        input_speed, input_std, output_speed, output_std = benchmark(config.model_name)
+        input_speed, input_std, output_speed, output_std = benchmark(config.model_name, assistance_config)
         print(f'{input_speed:.2f}+-{input_std:.2f}, {output_speed:.2f}+-{output_std:.2f}')
 

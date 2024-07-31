@@ -37,7 +37,7 @@ class AssistantConfig:
     learning_rate: float = 6e-4
     train_size: int = 500
     test_size: int = 50
-    log_size: int = 100
+    log_size: int = 50
 
 class MetricTracker:
     def __init__(self, objective: Literal['classification', 'regression'], criterion, n_blocks: int):
@@ -49,12 +49,15 @@ class MetricTracker:
     def reset(self):
         self.running_loss = 0
         self.running_tokens = 0
+        self.running_samples = 0
         if self.objective == 'classification':
             self.TP = torch.zeros(self.n_blocks).cuda()
             self.FP = torch.zeros(self.n_blocks).cuda()
             self.FN = torch.zeros(self.n_blocks).cuda()
-            self.total_samples = 0
             self.correct_samples = 0
+        elif self.objective == 'regression':
+            self.k_correct = {k: 0 for k in range(1, 6)}
+            self.k_total_se = {k: 0 for k in range(1, 6)}
 
     @torch.no_grad
     def update(self, y_true, y_pred):
@@ -62,8 +65,8 @@ class MetricTracker:
         Update the metrics with new batch of data.
 
         Parameters:
-        y_true (torch.Tensor): Ground truth labels, shape (batch_size, 12)
-        y_pred (torch.Tensor): Predicted labels, shape (batch_size, 12)
+        y_true (torch.Tensor): Ground truth labels, shape (batch_size, n_blocks)
+        y_pred (torch.Tensor): Predicted labels, shape (batch_size, n_blocks)
         """
         # Ensure the tensors are of the same shape
         assert y_true.shape == y_pred.shape, "Shape of y_true and y_pred must match"
@@ -71,6 +74,8 @@ class MetricTracker:
         num_tokens = y_true.size(0)
         self.running_tokens += num_tokens
         self.running_loss += self.criterion(y_pred, y_true).item() * num_tokens
+        # Normally this is just running_tokens * n_blocks
+        self.running_samples += y_true.numel()
 
         if self.objective == 'classification':
             # Binarize predictions (assuming predictions are probabilities or logits)
@@ -82,8 +87,29 @@ class MetricTracker:
             self.FN += (y_true * (1 - y_pred)).sum(dim=0)
 
             # Update counts for accuracy
-            self.correct_samples += (y_true == y_pred).float().sum().item()
-            self.total_samples += y_true.numel()
+            self.correct_samples += (y_true == y_pred).float().sum().item() 
+        elif self.objective == 'regression':
+            bsz, _ = y_true.shape
+
+            for k in range(1, 6):
+                correct = 0
+                total_se = 0
+
+                for i in range(bsz):
+                    top_k_pred = torch.topk(y_pred[i], k).indices
+                    top_k_target = torch.topk(y_true[i], k).indices
+
+                    if set(top_k_pred.cpu().numpy()) == set(top_k_target.cpu().numpy()):
+                        correct += 1
+
+                    top_k_pred_values = y_pred[i][top_k_pred]
+                    top_k_target_values = y_true[i][top_k_target]
+
+                    se = torch.sum((top_k_pred_values - top_k_target_values) ** 2)
+                    total_se += se.item()
+
+                self.k_correct[k] += correct
+                self.k_total_se[k] += total_se
 
     def _compute_metrics_classification(self):
         """
@@ -96,7 +122,7 @@ class MetricTracker:
         precision = self.TP / (self.TP + self.FP + 1e-8)
         recall = self.TP / (self.TP + self.FN + 1e-8)
         f1_score = 2 * (precision * recall) / (precision + recall + 1e-8)
-        accuracy = self.correct_samples / self.total_samples
+        accuracy = self.correct_samples / self.running_samples
 
         return {
             "precision": precision.mean().item(),
@@ -105,10 +131,33 @@ class MetricTracker:
             "accuracy": accuracy
         }
 
+    def _compute_metrics_regression(self):
+        """
+        Compute k-accuracy and top-k MSE for k in range(1, 6).
+
+        Returns:
+        dict: Dictionary containing k-accuracy and top-k MSE for k in range(1, 6)
+        """
+        k_metrics = {}
+        
+        for k in range(1, 6):
+            k_accuracy = self.k_correct[k] / self.running_tokens
+            # We take the SSE of k samples per token
+            top_k_mse = self.k_total_se[k] / (k * self.running_tokens)
+
+            k_metrics[f'{k}_accuracy'] = k_accuracy
+            k_metrics[f'top_{k}_mse'] = top_k_mse
+
+        return k_metrics
+
     def compute_metrics(self):
         metrics = {'loss': self.running_loss / self.running_tokens}
         if self.objective == 'classification':
             metrics.update(self._compute_metrics_classification())
+        elif self.objective == 'regression':
+            metrics.update(self._compute_metrics_regression())
+        else: 
+            assert False, 'Unkown objective'
         
         return metrics
 
@@ -236,12 +285,13 @@ def get_criterion():
 
         # return new_bce_loss_with_logits
 
-dropout = 0.1
+dropout = 0.0
 weight_decay = 1e-1 
 lr = config.learning_rate 
 print(f'{lr=}')
 cfg = GPTConfig(n_layer=config.n_layer, n_head=config.n_head, n_embd=config.n_embd, bias=False, dropout=dropout)
 print('Assistant config:')
+print(cfg)
 model = GPT2ForLayerPruning(cfg, teacher_model.config.hidden_size, teacher_model.config.num_hidden_layers).cuda()
 optim = model.configure_optimizers(weight_decay, lr, 'cuda')
 criterion = get_criterion()
@@ -278,8 +328,10 @@ for idx, batch in tqdm(enumerate(train_loader), total=config.train_size):
             f'val_{metric}': value 
             for metric, value in compute_val_metrics(model, test_loader, criterion).items()
         }
+        wandb_message = train_metrics | val_metrics
+        print(wandb_message)
         # NOTE: Maybe no need to require python 3.9 for just that line...  
-        wandb.log(train_metrics | val_metrics, step=idx)
+        wandb.log(wandb_message, step=idx)
         model.train()
         train_tracker.reset()
 

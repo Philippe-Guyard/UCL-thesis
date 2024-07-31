@@ -6,7 +6,7 @@ from typing import List, Literal, Optional
 import pandas as pd
 
 from scripts import benchmark
-from models import get_basemodel_name, is_local_model_name, load_assistant
+from models import AssistanceConfig, get_basemodel_name, is_local_model_name, load_assistant
 
 from lm_eval import evaluator, tasks, models
 from transformers import HfArgumentParser, AutoModelForCausalLM, AutoConfig
@@ -134,7 +134,7 @@ class EvalConfig:
     metadata: Optional[str] = field(default=None)
 
 if __name__ == '__main__':
-    config: EvalConfig = HfArgumentParser(EvalConfig).parse_args_into_dataclasses()[0]
+    config, assistant_config = HfArgumentParser((EvalConfig, AssistanceConfig)).parse_args_into_dataclasses()
     assert (config.model_name is None) ^ (config.run_name is None), 'Exactly one of --model_name or --run_name should be specified'
     csv_out = Path(config.csv_out)
     if not config.append:
@@ -161,10 +161,6 @@ if __name__ == '__main__':
     if config.benchmark:
         input_speeds, output_speeds = [], []
         for model_path in df.index:
-            assistant_name = None 
-            if '@' in model_path:
-                model_path, assistant_name = model_path.split('@')
-
             input_speed, input_std, output_speed, output_std = benchmark(model_path, assistant_name=assistant_name)
             input_speeds.append(format_number(input_speed, input_std))
             output_speeds.append(format_number(output_speed, output_std))
