@@ -34,6 +34,7 @@ class AssistantConfig:
     n_head: int 
     n_embd: int
     gradient_accumulation_steps: int = 16
+    learning_rate: float = 6e-4
     train_size: int = 500
     test_size: int = 50
     log_size: int = 100
@@ -187,12 +188,16 @@ def generate_synthetic_data(batch, device):
 def approximate_class_weight(loader, sample_size):
     assert objective_config.objective == 'classification'
     weights = torch.zeros(n_blocks)
-    for N, batch in enumerate(loader):
+    N = 0
+    for batch in loader:
         _, y = generate_synthetic_data(batch, 'cpu')
+        if y is None:
+            continue
+
         batch_weights = y.mean(dim=0)
         # Simple averaging
         weights -= 1. / (N + 1) * (weights - batch_weights)
-
+        N += 1
         if N >= sample_size:
             break
 
@@ -233,8 +238,10 @@ def get_criterion():
 
 dropout = 0.1
 weight_decay = 1e-1 
-lr = 6e-4
+lr = config.learning_rate 
+print(f'{lr=}')
 cfg = GPTConfig(n_layer=config.n_layer, n_head=config.n_head, n_embd=config.n_embd, bias=False, dropout=dropout)
+print('Assistant config:')
 model = GPT2ForLayerPruning(cfg, teacher_model.config.hidden_size, teacher_model.config.num_hidden_layers).cuda()
 optim = model.configure_optimizers(weight_decay, lr, 'cuda')
 criterion = get_criterion()
