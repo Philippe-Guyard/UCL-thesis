@@ -34,10 +34,15 @@ def distil_layers(model_name: str, train_size: int, test_size: int, log_size: in
     def get_all_block_inputs(block_idx):
         assert len(TensorStorage._cur_sample[f'block{block_idx}_first']) == 1
         first = TensorStorage._cur_sample[f'block{block_idx}_first'][0].squeeze()
-        cached = torch.cat([
-            x.view(1, -1) for x in TensorStorage._cur_sample[f'block{block_idx}']
-        ], dim=0) 
-        return torch.cat([first, cached], dim=0) 
+        # If 0 tokens are generated cached_key is not in the sample
+        cached_key = f'block{block_idx}'
+        if cached_key in TensorStorage._cur_sample:
+            cached = torch.cat([
+                x.view(1, -1) for x in TensorStorage._cur_sample[cached_key]
+            ], dim=0) 
+            first = torch.cat([first, cached], dim=0) 
+        
+        return first
 
     def generate_data(batch):
         # Make sure we are operating with a clean dataset
