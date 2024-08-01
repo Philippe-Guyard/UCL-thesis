@@ -28,15 +28,16 @@ class AutoAssistedModel(AutoModelForCausalLM):
 
 class AssistedHFLM(models.huggingface.HFLM):
     def __init__(self, *args, **kwargs):
-        self.assistant_name = kwargs.pop('assistant_name', None)
+        self.assistance_config = kwargs.pop('assistance_config', None)
         self.pretrained=kwargs['pretrained']
         super().__init__(*args, **kwargs)
         
     def _create_model(self, *args, **kwargs):
         result = super()._create_model(*args, **kwargs)
-        if self.assistant_name is not None:
+        self.assistance_config: AssistanceConfig
+        if self.assistance_config is not None and self.assistance_config.assistant_name is not None:
             # No cache for assistant because lm_eval does not use model.generate, so it becomes unclear when to reset it 
-            load_assistant(Path(self.assistant_name), self._model, model_basename=get_basemodel_name(self.pretrained), assistant_use_cache=False)
+            load_assistant(self.assistance_config, self._model, model_basename=get_basemodel_name(self.pretrained), assistant_use_cache=False)
 
         return result
 
@@ -68,20 +69,16 @@ def format_result(results, task):
     acc, stderr = get_metric_values(results, task) 
     return format_number(acc, stderr)
 
-def evaluate_checkpoint(model_path: str, tasks: List[str]):
+def evaluate_checkpoint(model_path: str, tasks: List[str], assistance_config: Optional[AssistanceConfig]=None):
     if len(tasks) == 0:
         # Only benchmarking case 
         return None 
 
     # Why does batch_size='auto' not work??
-    assistant_name = None
-    if '@' in model_path:
-        model_path, assistant_name = model_path.split('@')
-
     lm_obj = AssistedHFLM(
         pretrained=model_path,
         batch_size=1,
-        assistant_name=assistant_name
+        assistance_config=assistance_config
     )
     results = evaluator.simple_evaluate(
         model=lm_obj,
@@ -93,6 +90,7 @@ def evaluate_checkpoint(model_path: str, tasks: List[str]):
     return results
 
 def eval_all_checkpoints(run_name: str, tasks: List[str]):
+    assert False, 'Not implemented'
     checkpoints_folder = Path(f'./runs/{run_name}/checkpoints')
     all_checkpoints = [f for f in checkpoints_folder.iterdir() if f.is_dir()]
     all_results = {task: [] for task in tasks}
@@ -111,12 +109,11 @@ def eval_all_checkpoints(run_name: str, tasks: List[str]):
     df = pd.DataFrame(all_results)
     return df 
 
-def eval_model(model_name: str, tasks: List[str]):
+def eval_model(model_name: str, tasks: List[str], assistance_config: Optional[AssistanceConfig]=None):
     all_results = {task: [] for task in tasks}
-    basename = get_basemodel_name(model_name.split('@', 1)[0])
-    all_results['model'] = [basename]
+    all_results['model'] = [model_name]
     all_results['model_path'] = [model_name]
-    results = evaluate_checkpoint(model_name, tasks)
+    results = evaluate_checkpoint(model_name, tasks, assistance_config=assistance_config)
     for task in tasks:
         all_results[task].append(format_result(results, task))
     
@@ -144,7 +141,7 @@ if __name__ == '__main__':
     tasks = config.tasks.split(',') if config.tasks is not None else []
 
     if config.model_name:
-        df = eval_model(config.model_name, tasks)
+        df = eval_model(config.model_name, tasks, assistance_config=assistant_config)
     else:
         df = eval_all_checkpoints(config.run_name, tasks)
 
@@ -161,7 +158,7 @@ if __name__ == '__main__':
     if config.benchmark:
         input_speeds, output_speeds = [], []
         for model_path in df.index:
-            input_speed, input_std, output_speed, output_std = benchmark(model_path, assistant_name=assistant_name)
+            input_speed, input_std, output_speed, output_std = benchmark(model_path, assistance_config=assistant_config)
             input_speeds.append(format_number(input_speed, input_std))
             output_speeds.append(format_number(output_speed, output_std))
         

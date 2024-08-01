@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import torch
 from scripts import collect_output_hooks
@@ -112,4 +113,9 @@ if __name__ == '__main__':
     print('Layers sorted by linearity:')
     print(*sorted(enumerate(errors), key=lambda x: x[1]))
 
-    torch.save(layers.state_dict(), config.layers_out)
+    layers_root = Path(config.layers_out)
+    layers_root.mkdir(exist_ok=True, parents=True)
+    with open(layers_root.joinpath('layer_errors.json'), 'w') as f:
+        json.dump(errors, f)
+
+    torch.save(layers.state_dict(), layers_root.joinpath('distilled_layers.pt'))
