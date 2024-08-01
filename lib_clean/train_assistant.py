@@ -102,7 +102,8 @@ class MetricTracker:
                     if set(top_k_pred.cpu().numpy()) == set(top_k_target.cpu().numpy()):
                         correct += 1
 
-                    top_k_pred_values = y_pred[i][top_k_pred]
+                    # Compare how well do we predict the actual target layers to drop
+                    top_k_pred_values = y_pred[i][top_k_target]
                     top_k_target_values = y_true[i][top_k_target]
 
                     se = torch.sum((top_k_pred_values - top_k_target_values) ** 2)
