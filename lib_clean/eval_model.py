@@ -6,25 +6,10 @@ from typing import List, Literal, Optional
 import pandas as pd
 
 from scripts import benchmark
-from models import AssistanceConfig, get_basemodel_name, is_local_model_name, load_assistant
+from models import AssistanceConfig, get_basemodel_name, is_local_model_name, load_assistant, distil_prune
 
 from lm_eval import evaluator, tasks, models
 from transformers import HfArgumentParser, AutoModelForCausalLM, AutoConfig
-
-class AutoAssistedModel(AutoModelForCausalLM):
-    def from_pretrained(*args, **kwargs):
-        model_name = args[0]
-        assistant_name = None 
-        # We use @ as a special key to separate model_path and assistant_ath 
-        if '@' in model_name:
-            model_name, assistant_name = model_name.split('@')
-
-        # Replace the first argument in case we had an assistant 
-        model = AutoModelForCausalLM.from_pretrained(model_name, *args[1:], **kwargs) 
-        if assistant_name is not None: 
-            load_assistant(Path(assistant_name), model, get_basemodel_name(model_name))
-
-        return model
 
 class AssistedHFLM(models.huggingface.HFLM):
     def __init__(self, *args, **kwargs):
@@ -33,11 +18,21 @@ class AssistedHFLM(models.huggingface.HFLM):
         super().__init__(*args, **kwargs)
         
     def _create_model(self, *args, **kwargs):
+        prune_config = None
+        if self.pretrained.endswith('.json'):
+            with open(self.pretrained, 'r') as f:
+                prune_config = json.load(f)
+                self.pretrained = prune_config['model_name']
+            
         result = super()._create_model(*args, **kwargs)
         self.assistance_config: AssistanceConfig
         if self.assistance_config is not None and self.assistance_config.assistant_name is not None:
             # No cache for assistant because lm_eval does not use model.generate, so it becomes unclear when to reset it 
             load_assistant(self.assistance_config, self._model, model_basename=get_basemodel_name(self.pretrained), assistant_use_cache=False)
+        elif prune_config is not None:
+            target_sparsity = prune_config['target_sparsity'] 
+            layers_root = Path(prune_config['distilled_layers'])
+            distil_prune(self._model, target_sparsity, layers_root)
 
         return result
 
@@ -83,7 +78,7 @@ def evaluate_checkpoint(model_path: str, tasks: List[str], assistance_config: Op
     results = evaluator.simple_evaluate(
         model=lm_obj,
         tasks=tasks,
-        num_fewshot=0,
+        # num_fewshot=0,
         batch_size=1,
         device="cuda",
     )

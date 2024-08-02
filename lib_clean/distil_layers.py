@@ -12,6 +12,8 @@ from torch.utils.data import DataLoader
 from datasets import load_dataset
 from transformers import HfArgumentParser
 
+#TODO: bias=False??
+
 def distil_layers(model_name: str, train_size: int, test_size: int, log_size: int):
     model, tokenizer = get_model(model_name)
     model.generation_config.pad_token_id = tokenizer.eos_token_id

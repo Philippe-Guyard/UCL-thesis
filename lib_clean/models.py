@@ -84,9 +84,29 @@ def get_basemodel_name(model_name: str, depth=0):
 
     return base_name
 
-ModelType = OPTForCausalLM | Qwen2ForCausalLM | GemmaForCausalLM | LlamaForCausalLM | RecurrentGemmaForCausalLM
-def get_model(model_name: str, **model_kwargs) -> Tuple[ModelType, PreTrainedTokenizer]:
-    # Check by base_name, load model_name
+def distil_prune(model: ModelType, target_sparsity: float, layers_root: Path):
+    errors = None 
+    with open(layers_root.joinpath('layer_errors.json'), 'r') as f:
+        errors = json.load(f)
+    
+    model_orig_layers = get_decoder_layers(model)
+    n_blocks = len(model_orig_layers)
+    hidden_size = model.config.hidden_size
+    layers = nn.ModuleList((nn.Linear(hidden_size, hidden_size) for _ in range(n_blocks)))
+    layers.load_state_dict(torch.load(layers_root.joinpath('distilled_layers.pt')))
+
+    n_to_prune = int(target_sparsity * len(model_orig_layers)) 
+
+    # Add idx, Sort by error, slice
+    n_most_linear = sorted(enumerate(errors), key=lambda x: x[1])[:n_to_prune]
+    for idx, error in n_most_linear:
+        print(f'Replacing layer {idx} by a distilled linear layer')
+        model_orig_layers[idx] = layers[idx]
+    
+    set_decoder_layers(model, model_orig_layers)
+    return model 
+
+def _get_model(model_name: str, **model_kwargs):
     base_name = get_basemodel_name(model_name)
     getters_map = [ 
         ('qwen2', get_gated_model),
@@ -102,6 +122,23 @@ def get_model(model_name: str, **model_kwargs) -> Tuple[ModelType, PreTrainedTok
             return func(model_name, **model_kwargs)
     
     assert False, 'Unkown base model'
+
+ModelType = OPTForCausalLM | Qwen2ForCausalLM | GemmaForCausalLM | LlamaForCausalLM | RecurrentGemmaForCausalLM
+def get_model(model_name: str, **model_kwargs) -> Tuple[ModelType, PreTrainedTokenizer]:
+    # Check by base_name, load model_name
+    if model_name.endswith('.json'):
+        # This is a prune config
+        prune_config = None
+        with open(model_name, 'r') as f:
+            prune_config = json.load(f)
+        
+        model_name = prune_config['model_name']
+        layers_root = Path(prune_config['layers_root'])
+        sparsity_ratio = prune_config['target_sparsity']
+        model = _get_model(model_name, **model_kwargs)
+        return distil_prune(model, sparsity_ratio, layers_root)
+
+    return _get_model(model_name, **model_kwargs)
 
 @dataclass
 class AssistanceConfig:
