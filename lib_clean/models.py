@@ -86,6 +86,7 @@ def get_basemodel_name(model_name: str, depth=0):
 
 class LinearLayerIgnoreKwargs(nn.Module):
     def __init__(self, layer: nn.Linear):
+        super().__init__()
         self.layer = layer 
 
     def forward(self, hidden_states, *args, **kwargs):
