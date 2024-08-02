@@ -84,6 +84,13 @@ def get_basemodel_name(model_name: str, depth=0):
 
     return base_name
 
+class LinearLayerIgnoreKwargs(nn.Module):
+    def __init__(self, layer: nn.Linear):
+        self.layer = layer 
+
+    def forward(self, hidden_states, *args, **kwargs):
+        return self.layer(hidden_states)
+
 ModelType = OPTForCausalLM | Qwen2ForCausalLM | GemmaForCausalLM | LlamaForCausalLM | RecurrentGemmaForCausalLM
 def distil_prune(model: ModelType, target_sparsity: float, layers_root: Path):
     errors = None 
@@ -102,7 +109,7 @@ def distil_prune(model: ModelType, target_sparsity: float, layers_root: Path):
     n_most_linear = sorted(enumerate(errors), key=lambda x: x[1])[:n_to_prune]
     for idx, error in n_most_linear:
         print(f'Replacing layer {idx} by a distilled linear layer')
-        model_orig_layers[idx] = layers[idx]
+        model_orig_layers[idx] = LinearLayerIgnoreKwargs(layers[idx])
     
     set_decoder_layers(model, model_orig_layers)
     return model 
