@@ -84,6 +84,7 @@ def get_basemodel_name(model_name: str, depth=0):
 
     return base_name
 
+ModelType = OPTForCausalLM | Qwen2ForCausalLM | GemmaForCausalLM | LlamaForCausalLM | RecurrentGemmaForCausalLM
 def distil_prune(model: ModelType, target_sparsity: float, layers_root: Path):
     errors = None 
     with open(layers_root.joinpath('layer_errors.json'), 'r') as f:
@@ -123,7 +124,6 @@ def _get_model(model_name: str, **model_kwargs):
     
     assert False, 'Unkown base model'
 
-ModelType = OPTForCausalLM | Qwen2ForCausalLM | GemmaForCausalLM | LlamaForCausalLM | RecurrentGemmaForCausalLM
 def get_model(model_name: str, **model_kwargs) -> Tuple[ModelType, PreTrainedTokenizer]:
     # Check by base_name, load model_name
     if model_name.endswith('.json'):
