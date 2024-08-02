@@ -135,8 +135,8 @@ def get_model(model_name: str, **model_kwargs) -> Tuple[ModelType, PreTrainedTok
         model_name = prune_config['model_name']
         layers_root = Path(prune_config['layers_root'])
         sparsity_ratio = prune_config['target_sparsity']
-        model = _get_model(model_name, **model_kwargs)
-        return distil_prune(model, sparsity_ratio, layers_root)
+        model, tokenizer = _get_model(model_name, **model_kwargs)
+        return distil_prune(model, sparsity_ratio, layers_root), tokenizer
 
     return _get_model(model_name, **model_kwargs)
 
