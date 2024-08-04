@@ -94,6 +94,7 @@ class PretrainingConfig:
     eval_steps: Optional[int] = field(default=None)
     eval_size: int = field(default=1)
     eval_accumulation_steps: int = field(default=1)
+    resume_from_checkpoint: bool = field(default=False)
 
 
 config: PretrainingConfig = HfArgumentParser(PretrainingConfig).parse_args_into_dataclasses()[0]
@@ -159,7 +160,7 @@ trainer = Trainer(
     compute_metrics=compute_metrics,
 )
 
-trainer.train()
+trainer.train(resume_from_checkpoint=config.resume_from_checkpoint)
 
 final_path = root_folder.joinpath('final')
 model.save_pretrained(final_path)
