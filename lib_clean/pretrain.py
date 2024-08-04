@@ -48,6 +48,10 @@ def get_dataset(name: str, train_size: int, eval_size: int, seed: int):
         train_dataset = corpus['train'].map(tokenize_function, remove_columns='text')
         # test_dataset  = corpus['test'].map(tokenize_function, remove_columns='text')
         test_dataset = None # This has no test set 
+    elif name == 'tinystories':
+        stories = load_dataset('roneneldan/TinyStories')
+        train_dataset = to_tokenized_dataset(stories['train'], train_size, seed)
+        test_dataset = to_tokenized_dataset(stories['validation'], eval_size, seed)
     else:
         slimpajama = load_from_disk(name)
         train_dataset = to_tokenized_dataset(slimpajama, train_size, seed)
