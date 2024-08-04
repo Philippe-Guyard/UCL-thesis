@@ -3,6 +3,8 @@ import tempfile
 import shutil
 from pathlib import Path
 
+from tqdm import tqdm
+
 from models import get_model, get_decoder_layers, set_decoder_layers
 from tensor_utils import ConsecutiveAngularDistances, TensorStorage
 
@@ -11,6 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass, field
 from transformers import HfArgumentParser
+from datasets import load_dataset
 
 @dataclass 
 class PruneConfig:
@@ -142,12 +145,86 @@ def simple_prune(model_name: str, target_sparsity: float, data_dir: str):
     # model.config.num_hidden_layers = len(new_layers)
     # return model, tokenizer
 
+def cut_layers_distilloss(model_name: str, target_sparsity: float):
+    def distillation_loss(student_logits, teacher_logits, per_batch=False, temperature=1.0):
+        """
+        Compute the distillation loss between student and teacher logits.
+
+        Parameters:
+        - student_logits: Logits from the student model (tensor of shape [batch_size, vocab_size])
+        - teacher_logits: Logits from the teacher model (tensor of shape [batch_size, vocab_size])
+        - temperature: Temperature for softening the probability distributions
+
+        Returns:
+        - Loss value (scalar tensor)
+        """
+        # Soften the probabilities with temperature
+        student_probs = F.log_softmax(student_logits / temperature, dim=1)
+        teacher_probs = F.softmax(teacher_logits / temperature, dim=1)
+        
+        # Compute the KL divergence loss
+        reduction = 'none' if per_batch else 'batchmean'
+        kldiv_loss = F.kl_div(student_probs, teacher_probs, reduction=reduction)
+        if per_batch:
+            kldiv_loss = kldiv_loss.sum(dim=1)
+        
+        kldiv_loss *= (temperature ** 2)
+        return kldiv_loss
+
+    @torch.no_grad()
+    def get_distill_loss(model, tokenizer, orig_layers, new_layers, data, show_tqdm=False, per_batch=False, temperature=1.0):
+        data_iter = tqdm(data) if show_tqdm else data
+        losses = []
+        for x in data_iter:
+            tokens = tokenizer(x['text'], truncation=True, return_tensors='pt', max_length=1024)
+            input_ids = tokens.input_ids.cuda()
+            set_decoder_layers(model, new_layers)
+            student_logits = model(input_ids).logits.cpu().squeeze(dim=0)
+
+            set_decoder_layers(model, orig_layers)
+            teacher_logits = model(input_ids).logits.cpu().squeeze(dim=0)
+
+            losses.append(distillation_loss(student_logits, teacher_logits, per_batch=per_batch, temperature=temperature))        
+        
+        if per_batch:
+            losses = torch.cat(losses, dim=0)
+        else:
+            losses = torch.tensor(losses)
+        
+        return losses
+    
+    def distil_prune_once(model, tokenizer, data):
+        orig_layers = get_decoder_layers(model)
+        losses = torch.zeros(len(orig_layers) - 1)
+        for idx_to_remove in range(len(orig_layers) - 1):
+            new_layers = orig_layers[:idx_to_remove] + orig_layers[idx_to_remove + 1:]
+            losses[idx_to_remove] = get_distill_loss(model, tokenizer, orig_layers, new_layers, data).mean()
+        
+        best_idx = losses.argmin()
+        return best_idx
+
+    model, tokenizer = get_model(model_name)
+    n_layers = len(get_decoder_layers(model))
+    n_to_remove = int(target_sparsity * n_layers)
+    wikitext = load_dataset("Salesforce/wikitext", "wikitext-103-v1")
+    data = wikitext['train'].select(range(100)).filter(lambda x: len(x) > 0)
+    for _ in range(n_to_remove):
+        model_layers = get_decoder_layers(model)
+        idx_to_remove = distil_prune_once(model, tokenizer, data)
+        new_layers = model_layers[:idx_to_remove] + model_layers[idx_to_remove + 1:] 
+        set_decoder_layers(model, new_layers)
+    
+    model.config.num_hidden_layers = n_layers - n_to_remove
+    return model, tokenizer
+
 config: PruneConfig = HfArgumentParser(PruneConfig).parse_args_into_dataclasses()[0]
 print('Got strategy:', config.strategy)
 if config.strategy == 'simple':
     model, tokenizer = simple_prune(config.model, config.target_sparsity, config.data_dir) 
 elif config.strategy == 'iterative':
     model, tokenizer = iterative_prune(config.model, config.target_sparsity)
+elif config.strategy == 'iter_distil':
+    model, tokenizer = cut_layers_distilloss(config.model, config.target_sparsity)
 else:
     assert False 
 
