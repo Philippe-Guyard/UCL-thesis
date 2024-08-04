@@ -26,7 +26,7 @@ def get_trainable_model(model_name: str) -> Tuple[LlamaForCausalLM, LlamaTokeniz
 
 def tokenize_function(examples):
     tokenized_inputs = tokenizer(
-        examples["text"], truncation=True, padding="max_length", max_length=1024
+        examples["text"], truncation=True, padding="max_length", max_length=2048
     )
     tokenized_inputs["labels"] = tokenized_inputs["input_ids"].copy()
     return tokenized_inputs
