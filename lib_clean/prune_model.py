@@ -179,10 +179,10 @@ def cut_layers_distilloss(model_name: str, target_sparsity: float):
             tokens = tokenizer(x['text'], truncation=True, return_tensors='pt', max_length=1024)
             input_ids = tokens.input_ids.cuda()
             set_decoder_layers(model, new_layers)
-            student_logits = model(input_ids).logits.cpu().squeeze(dim=0)
+            student_logits = model(input_ids, use_cache=False, past_key_values=None).logits.cpu().squeeze(dim=0)
 
             set_decoder_layers(model, orig_layers)
-            teacher_logits = model(input_ids).logits.cpu().squeeze(dim=0)
+            teacher_logits = model(input_ids, use_cache=False, past_key_values=None).logits.cpu().squeeze(dim=0)
 
             losses.append(distillation_loss(student_logits, teacher_logits, per_batch=per_batch, temperature=temperature))        
         
@@ -200,6 +200,7 @@ def cut_layers_distilloss(model_name: str, target_sparsity: float):
             new_layers = orig_layers[:idx_to_remove] + orig_layers[idx_to_remove + 1:]
             losses[idx_to_remove] = get_distill_loss(model, tokenizer, orig_layers, new_layers, data).mean()
         
+        print('Got losses:', losses)
         best_idx = losses.argmin()
         return best_idx
 
@@ -208,7 +209,8 @@ def cut_layers_distilloss(model_name: str, target_sparsity: float):
     n_to_remove = int(target_sparsity * n_layers)
     wikitext = load_dataset("Salesforce/wikitext", "wikitext-103-v1")
     data = wikitext['train'].select(range(100)).filter(lambda x: len(x) > 0)
-    for _ in range(n_to_remove):
+    for iter_idx in range(n_to_remove):
+        print(f'===== Iteration {iter_idx} =====')
         model_layers = get_decoder_layers(model)
         idx_to_remove = distil_prune_once(model, tokenizer, data)
         new_layers = model_layers[:idx_to_remove] + model_layers[idx_to_remove + 1:] 
