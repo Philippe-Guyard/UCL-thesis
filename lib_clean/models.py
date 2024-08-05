@@ -84,14 +84,6 @@ def get_basemodel_name(model_name: str, depth=0):
 
     return base_name
 
-class LinearLayerIgnoreKwargs(nn.Module):
-    def __init__(self, layer: nn.Linear):
-        super().__init__()
-        self.layer = layer 
-
-    def forward(self, hidden_states, *args, **kwargs):
-        return self.layer(hidden_states)
-
 ModelType = OPTForCausalLM | Qwen2ForCausalLM | GemmaForCausalLM | LlamaForCausalLM | RecurrentGemmaForCausalLM
 def distil_prune(model: ModelType, target_sparsity: float, layers_root: Path):
     errors = None 
@@ -108,9 +100,22 @@ def distil_prune(model: ModelType, target_sparsity: float, layers_root: Path):
 
     # Add idx, Sort by error, slice
     n_most_linear = sorted(enumerate(errors), key=lambda x: x[1])[:n_to_prune]
+    events = AssistantEvents(None, None, False)
+    events.skip_layers = set()
     for idx, error in n_most_linear:
+        events.skip_layers.add(idx)
         print(f'Replacing layer {idx} by a distilled linear layer')
-        model_orig_layers[idx] = LinearLayerIgnoreKwargs(layers[idx])
+        layer_cls = None
+        if 'opt' in model.config.model_type:
+            layer_cls = OPTSkippableLayer
+        elif 'llama' in model.config.model_type:
+            layer_cls = LlamaSkippableLayer
+        elif 'gemma' in model.config.model_type or 'qwen2' in model.config.model_type:
+            layer_cls = RoPEModelSkippableLayer
+        else:
+            assert False
+
+        model_orig_layers[idx] = layer_cls(model_orig_layers[idx], idx, events, replacement=layers[idx])
     
     set_decoder_layers(model, model_orig_layers)
     return model 
@@ -192,11 +197,12 @@ class AssistantEvents:
             warnings.warn('Attempting to reset cache on assistant with use_cache=True')
     
 class SkippableLayerBase(nn.Module):
-    def __init__(self, layer: nn.Module, idx: int, assistant_events: AssistantEvents):
+    def __init__(self, layer: nn.Module, idx: int, assistant_events: AssistantEvents, replacement=None):
         super().__init__()
         self.layer = layer
         self.events = assistant_events
         self.layer_idx = idx
+        self.replacement = replacement
     
     def skip_forward(self, *args, **kwargs):
         # hidden_states = args[0] if len(args) > 0 else kwargs['hidden_states']
@@ -209,7 +215,13 @@ class SkippableLayerBase(nn.Module):
             self.events.compute_event.synchronize()
         
         if self.layer_idx in self.events.skip_layers:
-            return self.skip_forward(*args, **kwargs)
+            # (hidden_states, past_key_values)
+            skip_out = self.skip_forward(*args, **kwargs)
+            # TODO: Ugly solution but whatever 
+            if self.replacement is not None:
+                skip_out = (self.replacement(skip_out[0]), *skip_out[1:])
+
+            return skip_out
         else:
             return self.layer(*args, **kwargs)
 
