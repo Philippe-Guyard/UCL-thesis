@@ -160,6 +160,7 @@ class AssistanceConfig:
     prune_nlayers: Optional[int] = None
     # Prune all layers that are less than distance
     prune_ndist: Optional[float] = None
+    prune_maxlayers: Optional[int] = None 
 
 class AssistantEvents:
     def __init__(self, model: GPT2ForLayerPruning, config: AssistanceConfig, use_cache: bool) -> None:
@@ -183,6 +184,11 @@ class AssistantEvents:
                 skip_indices = skip_indices.indices
             else:
                 skip_indices = torch.nonzero(scores < self.config.prune_ndist)
+                if self.config.prune_maxlayers is not None:
+                    new_scores = scores[skip_indices]
+                    best_indices = torch.topk(new_scores, self.config.prune_maxlayers, largest=False).indices
+                    # NOTE: Best indices is in the space of [0, len(skip_indices)) and not [0, n_layers)
+                    skip_indices = skip_indices[best_indices]
 
             self.skip_layers = set(skip_indices.cpu().numpy())
             
