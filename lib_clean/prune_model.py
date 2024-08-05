@@ -213,6 +213,8 @@ def cut_layers_distilloss(model_name: str, target_sparsity: float):
         print(f'===== Iteration {iter_idx} =====')
         model_layers = get_decoder_layers(model)
         idx_to_remove = distil_prune_once(model, tokenizer, data)
+        # Layers are 1-indexed
+        print(f'Removing layer {idx_to_remove + 1}')
         new_layers = model_layers[:idx_to_remove] + model_layers[idx_to_remove + 1:] 
         set_decoder_layers(model, new_layers)
     
