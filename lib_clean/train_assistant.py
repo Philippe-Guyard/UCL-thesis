@@ -1,9 +1,10 @@
 from dataclasses import dataclass, asdict
 import json
 from pathlib import Path
+import time
 from typing import Literal, Optional
 
-from models import get_model, get_decoder_layers
+from models import get_model, get_decoder_layers, set_decoder_layers
 from scripts import collect_output_hooks
 from tensor_utils import TensorStorage
 from gpt import GPT2ForLayerPruning, GPTConfig
@@ -21,6 +22,7 @@ import wandb
 @dataclass
 class TrainingObjective:
     objective: Literal['regression', 'classification'] = 'regression'
+    use_distil_target: bool = False
     angular_dist_threshold: Optional[float] = None
     cos_sim_threshold: Optional[float] = None 
     weight_estimation_steps: int = 50
@@ -89,28 +91,23 @@ class MetricTracker:
             # Update counts for accuracy
             self.correct_samples += (y_true == y_pred).float().sum().item() 
         elif self.objective == 'regression':
-            bsz, _ = y_true.shape
-
             for k in range(1, 6):
-                correct = 0
-                total_se = 0
+                top_k_pred_indices = torch.topk(y_pred, k, largest=False).indices
+                top_k_target_indices = torch.topk(y_true, k, largest=False).indices
 
-                for i in range(bsz):
-                    top_k_pred = torch.topk(y_pred[i], k).indices
-                    top_k_target = torch.topk(y_true[i], k).indices
+                # Calculate the number of correct predictions
+                correct = torch.sum(
+                    torch.eq(top_k_pred_indices.sort(dim=1).values, top_k_target_indices.sort(dim=1).values).all(dim=1)
+                ).item()
 
-                    if set(top_k_pred.cpu().numpy()) == set(top_k_target.cpu().numpy()):
-                        correct += 1
+                # Calculate the squared errors for the top-k target layers
+                top_k_target_values = y_true.gather(1, top_k_target_indices)
+                top_k_pred_values = y_pred.gather(1, top_k_target_indices)
 
-                    # Compare how well do we predict the actual target layers to drop
-                    top_k_pred_values = y_pred[i][top_k_target]
-                    top_k_target_values = y_true[i][top_k_target]
+                total_se = torch.sum((top_k_pred_values - top_k_target_values) ** 2).item()
 
-                    se = torch.sum((top_k_pred_values - top_k_target_values) ** 2)
-                    total_se += se.item()
-
-                self.k_correct[k] += correct
-                self.k_total_se[k] += total_se
+            self.k_correct[k] += correct
+            self.k_total_se[k] += total_se
 
     def _compute_metrics_classification(self):
         """
@@ -168,12 +165,14 @@ teacher_model, teacher_tokenizer = get_model(config.teacher_model)
 # Needed to avoid warnings from qwen2
 teacher_model.generation_config.pad_token_id = teacher_tokenizer.eos_token_id
 n_blocks = len(get_decoder_layers(teacher_model))
-collect_output_hooks(teacher_model, save_uncached=True, collect_modules={'block', 'token_embedding'})
-# teacher_model = teacher_model.cuda()
+collect_modules = {'token_embedding'}
+if not objective_config.use_distil_target:
+    collect_modules.add('block')
+collect_output_hooks(teacher_model, save_uncached=True, collect_modules=collect_modules)
+teacher_model = teacher_model.cuda()
 teacher_model.eval()
 
-@torch.no_grad
-def generate_synthetic_data(batch, device):
+def _generate_synthetic_data_angles(batch, device):
     # Make sure we are operating with a clean dataset
     TensorStorage.reset()
     # No padding since we have a batch size of 1, but truncate inputs that are too long 
@@ -235,12 +234,68 @@ def generate_synthetic_data(batch, device):
     y = torch.cat(synthetic_outputs, dim=0)
     return X.to(device), y.to(device)
 
+
+def distillation_loss(student_logits, teacher_logits, per_batch=False, temperature=1.0):
+    """
+    Compute the distillation loss between student and teacher logits.
+
+    Parameters:
+    - student_logits: Logits from the student model (tensor of shape [batch_size, vocab_size])
+    - teacher_logits: Logits from the teacher model (tensor of shape [batch_size, vocab_size])
+    - temperature: Temperature for softening the probability distributions
+
+    Returns:
+    - Loss value (scalar tensor)
+    """
+    # Soften the probabilities with temperature
+    student_probs = F.log_softmax(student_logits / temperature, dim=1)
+    teacher_probs = F.softmax(teacher_logits / temperature, dim=1)
+    
+    # Compute the KL divergence loss
+    reduction = 'none' if per_batch else 'batchmean'
+    kldiv_loss = F.kl_div(student_probs, teacher_probs, reduction=reduction)
+    if per_batch:
+        kldiv_loss = kldiv_loss.sum(dim=1)
+    
+    kldiv_loss *= (temperature ** 2)
+    return kldiv_loss
+
+@torch.no_grad()
+def _generate_synthetic_data_distil(batch, device): 
+    # TODO: This can be faster 
+    def get_logits():
+        return teacher_model(input_ids, use_cache=False, past_key_values=None).logits.squeeze(dim=0)
+    
+    TensorStorage.reset()
+    tokens = teacher_tokenizer(batch['text'], truncation=True, return_tensors='pt', max_length=2048)
+    input_ids = tokens.input_ids.cuda()    
+    layers = get_decoder_layers(teacher_model)
+    orig_logits = get_logits() 
+    seq_len = orig_logits.size(0)
+    X = TensorStorage._cur_sample['token_embedding_first'][0].squeeze(dim=0)
+    losses = torch.zeros((n_blocks, seq_len)).cuda()
+    for layer_idx in range(n_blocks):
+        new_layers = layers[:layer_idx] + layers[layer_idx + 1:]
+        set_decoder_layers(teacher_model, new_layers)
+        student_logits = get_logits() 
+        losses[layer_idx] = distillation_loss(student_logits, orig_logits, per_batch=True)
+        
+    set_decoder_layers(teacher_model, layers)
+    return X.to(device), losses.transpose(0, 1).to(device)
+
+@torch.no_grad()
+def generate_synthetic_data(batch, device): 
+    if objective_config.use_distil_target:
+        return _generate_synthetic_data_distil(batch, device)
+    else:
+        return _generate_synthetic_data_angles(batch, device)
+
 def approximate_class_weight(loader, sample_size):
     assert objective_config.objective == 'classification'
-    weights = torch.zeros(n_blocks)
+    weights = torch.zeros(n_blocks).cuda()
     N = 0
     for batch in loader:
-        _, y = generate_synthetic_data(batch, 'cpu')
+        _, y = generate_synthetic_data(batch, 'cuda')
         if y is None:
             continue
 
@@ -271,7 +326,7 @@ def get_criterion():
     if objective_config.objective == 'regression':
         return torch.nn.MSELoss()
     else:
-        pos_weights = approximate_class_weight(train_loader, objective_config.weight_estimation_steps).cuda()
+        pos_weights = approximate_class_weight(train_loader, objective_config.weight_estimation_steps)
         print(f'Found approximate pos weights: {pos_weights}')
         return torch.nn.BCEWithLogitsLoss(pos_weight=pos_weights)
         # criterions = [torch.nn.BCEWithLogitsLoss(pos_weight=pw, reduction='sum') for pw in pos_weights]
@@ -340,6 +395,7 @@ for idx, batch in tqdm(enumerate(train_loader), total=config.train_size):
         continue
  
     preds = model(X, training=True).squeeze()
+
     train_tracker.update(y, preds)
     loss = criterion(preds, y) 
     total_num_tokens += y.size(0)
@@ -349,6 +405,7 @@ for idx, batch in tqdm(enumerate(train_loader), total=config.train_size):
         'batch_loss': loss.item(),
         'total_tokens': total_num_tokens
     }, step=idx)
+
     if (idx + 1) % config.gradient_accumulation_steps == 0:
         optim.step()
         optim.zero_grad()
