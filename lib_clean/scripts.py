@@ -75,8 +75,8 @@ def collect_output_hooks(model, collect_modules=None, save_uncached=False):
         def save_data_hook(layer: nn.Module, args, kwargs, output):
             hidden_states = args[0] if len(args) > 0 else kwargs['hidden_states']
             is_first_token = TensorStorage.token_idx == 0
-            if (is_first_token and not save_uncached) or (not is_first_token and not save_cached):
-                return
+            # if (is_first_token and not save_uncached) or (not is_first_token and not save_cached):
+            #     return
             
             save_key = module_key
             if is_first_token:

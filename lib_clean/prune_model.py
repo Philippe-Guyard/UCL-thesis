@@ -184,7 +184,8 @@ def cut_layers_distilloss(model_name: str, target_sparsity: float):
             set_decoder_layers(model, orig_layers)
             teacher_logits = model(input_ids, use_cache=False, past_key_values=None).logits.cpu().squeeze(dim=0)
 
-            losses.append(distillation_loss(student_logits, teacher_logits, per_batch=per_batch, temperature=temperature))        
+            loss = distillation_loss(student_logits, teacher_logits, per_batch=per_batch, temperature=temperature) 
+            losses.append(loss * input_ids.size(1))
         
         if per_batch:
             losses = torch.cat(losses, dim=0)

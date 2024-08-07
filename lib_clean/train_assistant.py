@@ -36,6 +36,7 @@ class AssistantConfig:
     n_head: int 
     n_embd: int
     gradient_accumulation_steps: int = 16
+    dataset_name: str = 'wikitext'
     learning_rate: float = 6e-4
     train_size: int = 500
     test_size: int = 50
@@ -91,23 +92,29 @@ class MetricTracker:
             # Update counts for accuracy
             self.correct_samples += (y_true == y_pred).float().sum().item() 
         elif self.objective == 'regression':
+            preds_sorted =  torch.topk(y_pred, 6, largest=False, sorted=True)
+            targets_sorted = torch.topk(y_true, 6, largest=False, sorted=True) 
             for k in range(1, 6):
-                top_k_pred_indices = torch.topk(y_pred, k, largest=False).indices
-                top_k_target_indices = torch.topk(y_true, k, largest=False).indices
+                top_k_pred_indices = preds_sorted.indices[:, :k] 
+                top_k_target_indices = targets_sorted.indices[:, :k] 
 
                 # Calculate the number of correct predictions
                 correct = torch.sum(
-                    torch.eq(top_k_pred_indices.sort(dim=1).values, top_k_target_indices.sort(dim=1).values).all(dim=1)
+                    torch.eq(
+                        top_k_pred_indices.sort(dim=1).values, 
+                        top_k_target_indices.sort(dim=1).values
+                    )
+                    .all(dim=1)
                 ).item()
 
                 # Calculate the squared errors for the top-k target layers
-                top_k_target_values = y_true.gather(1, top_k_target_indices)
+                top_k_target_values = targets_sorted.values[:, :k] 
                 top_k_pred_values = y_pred.gather(1, top_k_target_indices)
 
                 total_se = torch.sum((top_k_pred_values - top_k_target_values) ** 2).item()
 
-            self.k_correct[k] += correct
-            self.k_total_se[k] += total_se
+                self.k_correct[k] += correct
+                self.k_total_se[k] += total_se
 
     def _compute_metrics_classification(self):
         """
@@ -234,7 +241,6 @@ def _generate_synthetic_data_angles(batch, device):
     y = torch.cat(synthetic_outputs, dim=0)
     return X.to(device), y.to(device)
 
-
 def distillation_loss(student_logits, teacher_logits, per_batch=False, temperature=1.0):
     """
     Compute the distillation loss between student and teacher logits.
@@ -313,12 +319,26 @@ def approximate_class_weight(loader, sample_size):
     pos_weights = (1 - weights) / weights
     return pos_weights
 
-wikitext = load_dataset("Salesforce/wikitext", "wikitext-103-v1")
-def filter_nonempty_select(data, final_size):
-    return data.select(range(2 * final_size)).filter(lambda x: len(x['text']) > 0).select(range(final_size))
+def get_loaders(dataset_name: str, train_size, test_size):
+    def filter_nonempty_select(data, final_size):
+        return data.select(range(2 * final_size)).filter(lambda x: len(x['text']) > 0).select(range(final_size))
+    if dataset_name == 'wikitext':
+        wikitext = load_dataset("Salesforce/wikitext", "wikitext-103-v1")
+        train_dataset = filter_nonempty_select(wikitext['train'], train_size)
+        test_dataset = filter_nonempty_select(wikitext['test'], test_size)
+    elif dataset_name == 'tinystories':
+        stories = load_dataset('roneneldan/TinyStories')
+        train_dataset = stories['train'].select(range(train_size)) 
+        test_dataset = stories['validation'].select(range(test_size))
+    else:
+        assert False 
 
-train_loader = DataLoader(filter_nonempty_select(wikitext['train'], config.train_size), batch_size=1, shuffle=True)
-test_loader  = DataLoader(filter_nonempty_select(wikitext['test'] , config.test_size) , batch_size=1, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True)
+    test_loader  = DataLoader(test_dataset, batch_size=1, shuffle=False)
+    return train_loader, test_loader
+
+train_loader, test_loader = get_loaders(config.dataset_name, config.train_size, config.test_size)
+
 # train_loader = DataLoader(wikitext['train'].select(range(config.train_size)), batch_size=1, shuffle=True)
 # test_loader  = DataLoader(wikitext['test'].select(range(config.test_size)) , batch_size=1, shuffle=False)
 
@@ -395,14 +415,15 @@ for idx, batch in tqdm(enumerate(train_loader), total=config.train_size):
         continue
  
     preds = model(X, training=True).squeeze()
-
     train_tracker.update(y, preds)
-    loss = criterion(preds, y) 
-    total_num_tokens += y.size(0)
+    num_tokens = y.size(0)
+    loss = criterion(preds, y) * num_tokens
+    total_num_tokens += num_tokens
 
     loss.backward()
     wandb.log({
-        'batch_loss': loss.item(),
+        # Normalize loss by batch size for logging
+        'batch_loss': (loss / num_tokens).item(),
         'total_tokens': total_num_tokens
     }, step=idx)
 
