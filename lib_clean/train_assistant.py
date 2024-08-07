@@ -330,6 +330,10 @@ def get_loaders(dataset_name: str, train_size, test_size):
         stories = load_dataset('roneneldan/TinyStories')
         train_dataset = stories['train'].select(range(train_size)) 
         test_dataset = stories['validation'].select(range(test_size))
+    elif dataset_name == 'tinytextbooks':
+        textbooks = load_dataset('nampdn-ai/tiny-textbooks')
+        train_dataset = textbooks['train'].select(range(train_size)) 
+        test_dataset = textbooks['test'].select(range(test_size))
     else:
         assert False 
 
