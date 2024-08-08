@@ -421,6 +421,7 @@ for idx, batch in tqdm(enumerate(train_loader), total=config.train_size):
     preds = model(X, training=True).squeeze()
     train_tracker.update(y, preds)
     num_tokens = y.size(0)
+    # Loss is MSE, but our batch size is not constant, so need to scale it up
     loss = criterion(preds, y) * num_tokens
     total_num_tokens += num_tokens
 
