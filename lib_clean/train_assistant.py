@@ -345,10 +345,38 @@ train_loader, test_loader = get_loaders(config.dataset_name, config.train_size, 
 
 # train_loader = DataLoader(wikitext['train'].select(range(config.train_size)), batch_size=1, shuffle=True)
 # test_loader  = DataLoader(wikitext['test'].select(range(config.test_size)) , batch_size=1, shuffle=False)
+def topk_mse(k):
+    def f(y_pred, y_true):
+        y_pred_indices = torch.topk(y_pred, k, largest=False).indices
+        y_true_indices = torch.topk(y_true, k, largest=False).indices
+
+        # NOTE: This is kind of like accuracy and recall, but for MSE 
+        # NOTE: In an ideal scenario, the indices are the same and thus this is just MSE
+        # How good is the model at it's predicted best indices  
+        true_se = (y_pred.gather(1, y_pred_indices) - y_true.gather(1, y_pred_indices)) ** 2
+        # How well does the model predict the best layers 
+        pred_se = (y_pred.gather(1, y_true_indices) - y_true.gather(1, y_true_indices)) ** 2
+        return torch.mean(0.5 * true_se + 0.5 * pred_se)
+
+    return f
 
 def get_criterion():
     if objective_config.objective == 'regression':
-        return torch.nn.MSELoss()
+        # Had an idea with using weights proportional to average dist 
+        # N = 0
+        # dists = []
+        # for batch in train_loader:
+        #     _, y = generate_synthetic_data(batch, 'cpu')
+        #     if y is None:
+        #         continue
+        #     N += 1
+        #     if N >= objective_config.weight_estimation_steps:
+        #         break 
+
+        #     dists.append(y)
+        
+        # dists = torch.cat(dists, dim=0)
+        return topk_mse(n_blocks // 2)
     else:
         pos_weights = approximate_class_weight(train_loader, objective_config.weight_estimation_steps)
         print(f'Found approximate pos weights: {pos_weights}')
@@ -425,11 +453,19 @@ for idx, batch in tqdm(enumerate(train_loader), total=config.train_size):
     loss = criterion(preds, y) * num_tokens
     total_num_tokens += num_tokens
 
+    # total_norm = 0
+    # for p in model.parameters():
+    #     if p.grad is not None:
+    #         param_norm = p.grad.data.norm(2)
+    #         total_norm += param_norm.item() ** 2
+    # total_norm = total_norm ** (1. / 2)
+
     loss.backward()
     wandb.log({
         # Normalize loss by batch size for logging
         'batch_loss': (loss / num_tokens).item(),
-        'total_tokens': total_num_tokens
+        'total_tokens': total_num_tokens,
+        # 'grad_norm': total_norm
     }, step=idx)
 
     if (idx + 1) % config.gradient_accumulation_steps == 0:
