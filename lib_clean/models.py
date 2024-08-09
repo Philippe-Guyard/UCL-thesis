@@ -102,6 +102,7 @@ def distil_prune(model: ModelType, target_sparsity: float, layers_root: Path):
     n_most_linear = sorted(enumerate(errors), key=lambda x: x[1])[:n_to_prune]
     events = AssistantEvents(None, None, False)
     events.skip_layers = set()
+    model_dtype = get_token_embedding(model).weight.dtype
     for idx, error in n_most_linear:
         events.skip_layers.add(idx)
         print(f'Replacing layer {idx} by a distilled linear layer')
@@ -115,7 +116,8 @@ def distil_prune(model: ModelType, target_sparsity: float, layers_root: Path):
         else:
             assert False
 
-        model_orig_layers[idx] = layer_cls(model_orig_layers[idx], idx, events, replacement=layers[idx])
+        new_layer = layers[idx].to(dtype=model_dtype)
+        model_orig_layers[idx] = layer_cls(new_layer, idx, events, replacement=layers[idx])
     
     set_decoder_layers(model, model_orig_layers)
     return model 

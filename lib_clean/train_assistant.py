@@ -377,11 +377,11 @@ class AugmentedLoader:
                 y_lst += delta_y
         except StopIteration:
             pass 
-        finally:
-            if len(X_lst) == 0:
-                raise StopIteration
 
-            return X_lst, y_lst
+        if len(X_lst) == 0:
+            raise StopIteration
+
+        return X_lst, y_lst
 
 def get_loaders(dataset_name: str, train_size, test_size, batch_size):
     def filter_nonempty_select(data, final_size):
@@ -558,7 +558,7 @@ for step_idx, batch in enumerate(tqdm(train_loader)):
     optim.step()
     optim.zero_grad()
 
-    if (step_idx + 1) % config.save_steps == 0:
+    if (step_idx + 1) % save_steps == 0:
         checkpoint = checkpoints_root.joinpath(f'checkpoint-{step_idx + 1}')
         tqdm.write(f'Saving {checkpoint.as_posix()}')
         dump_assistant(checkpoint)
