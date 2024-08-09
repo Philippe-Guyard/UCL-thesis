@@ -35,12 +35,13 @@ class AssistantConfig:
     n_layer: int 
     n_head: int 
     n_embd: int
-    gradient_accumulation_steps: int = 16
+    batch_size: int = 2
+    gradient_accumulation_steps: int = 8
     dataset_name: str = 'wikitext'
     learning_rate: float = 6e-4
     train_size: int = 500
     test_size: int = 50
-    log_size: int = 50
+    eval_steps: int = 10
 
 class MetricTracker:
     def __init__(self, objective: Literal['classification', 'regression'], criterion, n_blocks: int):
@@ -171,6 +172,7 @@ wandb.init(project='UCL thesis', name=config.run_name)
 teacher_model, teacher_tokenizer = get_model(config.teacher_model)
 # Needed to avoid warnings from qwen2
 teacher_model.generation_config.pad_token_id = teacher_tokenizer.eos_token_id
+teacher_tokenizer.padding_side = 'left'
 n_blocks = len(get_decoder_layers(teacher_model))
 collect_modules = {'token_embedding'}
 if not objective_config.use_distil_target:
@@ -179,67 +181,96 @@ collect_output_hooks(teacher_model, save_uncached=True, collect_modules=collect_
 teacher_model = teacher_model.cuda()
 teacher_model.eval()
 
+def select(t: torch.FloatTensor, attention_mask: torch.LongTensor):
+    # Given a tensor of shape (bsz, seq_len, *)
+    # Return a list of tensors of len bsz of shape defined by attention_mask
+    return [t[i, attention_mask[i]] for i in range(t.size(0))]
+
 def _generate_synthetic_data_angles(batch, device):
     # Make sure we are operating with a clean dataset
     TensorStorage.reset()
-    # No padding since we have a batch size of 1, but truncate inputs that are too long 
-    tokens = teacher_tokenizer(batch['text'], return_tensors='pt', max_length=2048, truncation=True, padding=False)
-    output = teacher_model.generate(
-        tokens.input_ids.cuda(),
-        attention_mask=tokens.attention_mask.cuda(),
-        max_new_tokens=50,
-        do_sample=True,
-        top_k=50,
-        top_p=0.95,
-        eos_token_id=teacher_tokenizer.eos_token_id,
+    tokens = teacher_tokenizer(batch['text'], return_tensors='pt', max_length=1024, truncation=True, padding=True)
+    teacher_model(
+        tokens.input_ids.cuda(), 
+        attention_mask=tokens.attention_mask.cuda(), 
+        use_cache=False, 
+        past_key_values=None
     )
-    tokens_generated = output.size(1) - tokens.input_ids.size(1)
-    if tokens_generated < 2:
-        return None, None 
+    att_mask = tokens.attention_mask.bool()
+    # output = teacher_model.generate(
+    #     tokens.input_ids.cuda(),
+    #     attention_mask=tokens.attention_mask.cuda(),
+    #     max_new_tokens=50,
+    #     do_sample=True,
+    #     top_k=50,
+    #     top_p=0.95,
+    #     eos_token_id=teacher_tokenizer.eos_token_id,
+    # )
+    # att_mask = tokens.attention_mask.bool()
+    # tokens_generated = output.size(1) - tokens.input_ids.size(1)
 
-    synthetic_inputs = []
-    synthetic_outputs = []
+    # if tokens_generated < 1:
+    #     return None, None 
+
     # Handle the first token separately as use_cache is False
-    synthetic_inputs.append(
-        # Squeeze the batch size of 1
-        TensorStorage._cur_sample['token_embedding_first'][0].squeeze()
-    )
+    # (bsz, seq_len, H)
+    # TODO: Why does it have an extra dim?
+    emb = TensorStorage._cur_sample['token_embedding_first'][0].squeeze(dim=0)
+    synthetic_inputs = select(emb, att_mask)
+
+    # (bsz, n_blocks + 1, seq_len, H)
     block_outputs = torch.stack([
-        TensorStorage._cur_sample[f'block{block_idx}_first'][0].squeeze()
+        TensorStorage._cur_sample[f'block{block_idx}_first'][0].squeeze(dim=0)
         for block_idx in range(0, n_blocks + 1)
-    ])
-    cos_similarities = F.cosine_similarity(block_outputs[:-1], block_outputs[1:], dim=-1).transpose(0, 1)
+    ], dim=1)
+
+    # (bsz, n_blocks, seq_len)
+    cos_similarities = F.cosine_similarity(
+        block_outputs[:, :-1], 
+        block_outputs[:, 1:], 
+        dim=-1
+    )
+    # (bsz, seq_len, n_blocks)
+    cos_similarities = cos_similarities.transpose(1, 2)
     cos_similarities = torch.clamp(cos_similarities, -1.0, 1.0)
-    synthetic_outputs.append(torch.acos(cos_similarities) / torch.pi)
-    for token_idx in range(tokens_generated - 1):
-        synthetic_inputs.append(
-            TensorStorage._cur_sample['token_embedding'][token_idx].view(1, -1)
-        )
+    synthetic_outputs = select(torch.acos(cos_similarities) / torch.pi, att_mask)
+    # for token_idx in range(tokens_generated - 1):
+    #     block_outputs = torch.stack([
+    #         TensorStorage._cur_sample[f'block{block_idx}'][token_idx]
+    #         for block_idx in range(0, n_blocks + 1)
+    #     ])
+    #     cos_similarities = F.cosine_similarity(block_outputs[:-1], block_outputs[1:])    
+    #     cos_similarities = torch.clamp(cos_similarities, -1.0, 1.0) 
+    #     angular_distances = torch.acos(cos_similarities) / torch.pi
+    #     outs = None 
+    #     if objective_config.objective == 'regression':
+    #         outs = angular_distances
+    #     else:
+    #         angular_thresh = objective_config.angular_dist_threshold
+    #         if angular_thresh is None:
+    #             cos_sim_thresh = torch.tensor(objective_config.cos_sim_threshold)
+    #             angular_thresh = torch.acos(cos_sim_thresh) / torch.pi
 
-        block_outputs = torch.stack([
-            TensorStorage._cur_sample[f'block{block_idx}'][token_idx].view(-1)
-            for block_idx in range(0, n_blocks + 1)
-        ])
-        cos_similarities = F.cosine_similarity(block_outputs[:-1], block_outputs[1:])    
-        cos_similarities = torch.clamp(cos_similarities, -1.0, 1.0) 
-        angular_distances = torch.acos(cos_similarities) / torch.pi
-        outs = None 
-        if objective_config.objective == 'regression':
-            outs = angular_distances
-        else:
-            angular_thresh = objective_config.angular_dist_threshold
-            if angular_thresh is None:
-                cos_sim_thresh = torch.tensor(objective_config.cos_sim_threshold)
-                angular_thresh = torch.acos(cos_sim_thresh) / torch.pi
+    #         outs = angular_distances <= angular_thresh
+        
 
-            outs = angular_distances <= angular_thresh
 
-        synthetic_outputs.append(outs.unsqueeze(0))
+    #     for micro_idx in range(bsz):
+    #         if output[micro_idx][seq_len + token_idx] == teacher_tokenizer.pad_token_id:
+    #             continue
+
+    #         synthetic_inputs[micro_idx].append(
+    #             TensorStorage._cur_sample['token_embedding'][token_idx]
+    #         )
+
 
     # Unsqueeze to simulate batch_size = 1 
-    X = torch.cat(synthetic_inputs, dim=0).unsqueeze(0)
-    y = torch.cat(synthetic_outputs, dim=0)
-    return X.to(device), y.to(device)
+    # X = torch.cat(synthetic_inputs, dim=0).unsqueeze(0)
+    # y = torch.cat(synthetic_outputs, dim=0)
+    # return X.to(device), y.to(device)
+    print(*[x.shape for x in synthetic_inputs])
+    print(*[x.shape for x in synthetic_outputs])
+    return [x.to(device) for x in synthetic_inputs], [x.to(device) for x in synthetic_outputs]
 
 def distillation_loss(student_logits, teacher_logits, per_batch=False, temperature=1.0):
     """
@@ -319,7 +350,42 @@ def approximate_class_weight(loader, sample_size):
     pos_weights = (1 - weights) / weights
     return pos_weights
 
-def get_loaders(dataset_name: str, train_size, test_size):
+class AugmentedLoader:
+    '''
+    Like a dataloader, but generates data in minibatches and accumulates them for gradient accumulation immediately 
+    '''
+    def __init__(self, loader: DataLoader, accumulation_steps: int, device='cuda'):
+        self.loader = loader 
+        self.steps = accumulation_steps
+        self.device = device
+        self._loader_iter = None
+
+    def __len__(self):
+        return (len(self.loader) + self.steps - 1) // self.steps
+    
+    def __iter__(self):
+        self._loader_iter = iter(self.loader)
+        return self
+    
+    def __next__(self):
+        assert self._loader_iter is not None 
+
+        X_lst, y_lst = [], []
+        try:
+            for _ in range(self.steps):
+                batch = next(self._loader_iter)
+                delta_X, delta_y = generate_synthetic_data(batch, self.device)
+                X_lst += delta_X
+                y_lst += delta_y
+        except StopIteration:
+            pass 
+        finally:
+            if len(X_lst) == 0:
+                raise StopIteration
+
+            return X_lst, y_lst
+
+def get_loaders(dataset_name: str, train_size, test_size, batch_size):
     def filter_nonempty_select(data, final_size):
         return data.select(range(2 * final_size)).filter(lambda x: len(x['text']) > 0).select(range(final_size))
     if dataset_name == 'wikitext':
@@ -337,11 +403,12 @@ def get_loaders(dataset_name: str, train_size, test_size):
     else:
         assert False 
 
-    train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True)
-    test_loader  = DataLoader(test_dataset, batch_size=1, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    train_loader = AugmentedLoader(train_loader, config.gradient_accumulation_steps)
+    test_loader  = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
     return train_loader, test_loader
 
-train_loader, test_loader = get_loaders(config.dataset_name, config.train_size, config.test_size)
+train_loader, test_loader = get_loaders(config.dataset_name, config.train_size, config.test_size, config.batch_size)
 
 # train_loader = DataLoader(wikitext['train'].select(range(config.train_size)), batch_size=1, shuffle=True)
 # test_loader  = DataLoader(wikitext['test'].select(range(config.test_size)) , batch_size=1, shuffle=False)
@@ -411,12 +478,14 @@ def compute_val_metrics(model, test_loader, criterion):
     model.eval()
     metric_tracker = MetricTracker(objective_config.objective, criterion, n_blocks) 
     for batch in test_loader:
-        X, y = generate_synthetic_data(batch, 'cuda')
-        if X is None:
-            continue
+        X_lst, y_lst = generate_synthetic_data(batch, 'cuda')
+        # if X is None:
+        #     continue
 
-        preds = model(X, training=True).squeeze()
-        metric_tracker.update(y, preds)
+        for X, y in zip(X_lst, y_lst):
+            X = X.unsqueeze(0)
+            preds = model(X, training=True).squeeze()
+            metric_tracker.update(y, preds)
     
     return metric_tracker.compute_metrics() 
 
@@ -425,9 +494,52 @@ total_num_tokens = 0
 optim.zero_grad()
 
 train_tracker = MetricTracker(objective_config.objective, criterion, n_blocks)
+ 
+for step_idx, batch in enumerate(tqdm(train_loader)):
+    # X, y = generate_synthetic_data(batch, 'cuda')
+    # if X is None:
+    #     continue
+ 
+    # preds = model(X, training=True).squeeze()
+    # train_tracker.update(y, preds)
+    # num_tokens = y.size(0)
+    # # Loss is MSE, but our batch size is not constant, so need to scale it up
+    # loss = criterion(preds, y) * num_tokens
+    # total_num_tokens += num_tokens
 
-for idx, batch in tqdm(enumerate(train_loader), total=config.train_size):
-    if (idx + 1) % config.log_size == 0:
+    X_lst, y_lst = batch 
+    total_loss = 0
+    for X, y in zip(X_lst, y_lst):
+        preds = model(X.unsqueeze(0), training=True).squeeze()
+        train_tracker.update(y, preds)
+        num_tokens = y.size(0)
+        # Loss is MSE, but our batch size is not constant, so need to scale it up
+        loss = criterion(preds, y) 
+        total_num_tokens += num_tokens
+        loss.backward()
+        total_loss += loss.item()
+
+    grad_norm = 0
+    for p in model.parameters():
+        if p.grad is None:
+            continue
+
+        param_norm = p.grad.data.norm(2)
+        grad_norm += param_norm.item() ** 2
+
+    grad_norm = grad_norm ** (1. / 2)
+
+    wandb.log({
+        # Normalize loss by batch size for logging
+        'batch_loss': total_loss / len(X_lst), 
+        'total_tokens': total_num_tokens,
+        'grad_norm': grad_norm
+    }, step=step_idx)
+
+    optim.step()
+    optim.zero_grad()
+
+    if (step_idx + 1) % config.eval_steps == 0:
         train_metrics = {
             f'train_{metric}': value 
             for metric, value in train_tracker.compute_metrics().items() 
@@ -438,39 +550,9 @@ for idx, batch in tqdm(enumerate(train_loader), total=config.train_size):
         }
         wandb_message = train_metrics | val_metrics
         # NOTE: Maybe no need to require python 3.9 for just that line...  
-        wandb.log(wandb_message, step=idx)
+        wandb.log(wandb_message, step=step_idx)
         model.train()
         train_tracker.reset()
-
-    X, y = generate_synthetic_data(batch, 'cuda')
-    if X is None:
-        continue
- 
-    preds = model(X, training=True).squeeze()
-    train_tracker.update(y, preds)
-    num_tokens = y.size(0)
-    # Loss is MSE, but our batch size is not constant, so need to scale it up
-    loss = criterion(preds, y) * num_tokens
-    total_num_tokens += num_tokens
-
-    # total_norm = 0
-    # for p in model.parameters():
-    #     if p.grad is not None:
-    #         param_norm = p.grad.data.norm(2)
-    #         total_norm += param_norm.item() ** 2
-    # total_norm = total_norm ** (1. / 2)
-
-    loss.backward()
-    wandb.log({
-        # Normalize loss by batch size for logging
-        'batch_loss': (loss / num_tokens).item(),
-        'total_tokens': total_num_tokens,
-        # 'grad_norm': total_norm
-    }, step=idx)
-
-    if (idx + 1) % config.gradient_accumulation_steps == 0:
-        optim.step()
-        optim.zero_grad()
 
 wandb.finish()
 
