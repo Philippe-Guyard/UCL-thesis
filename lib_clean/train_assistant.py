@@ -190,13 +190,14 @@ def _generate_synthetic_data_angles(batch, device):
     # Make sure we are operating with a clean dataset
     TensorStorage.reset()
     tokens = teacher_tokenizer(batch['text'], return_tensors='pt', max_length=1024, truncation=True, padding=True)
+    att_mask = tokens.attention_mask.cuda()
     teacher_model(
         tokens.input_ids.cuda(), 
-        attention_mask=tokens.attention_mask.cuda(), 
+        attention_mask=att_mask,
         use_cache=False, 
         past_key_values=None
     )
-    att_mask = tokens.attention_mask.bool()
+    att_mask = att_mask.bool()
     # output = teacher_model.generate(
     #     tokens.input_ids.cuda(),
     #     attention_mask=tokens.attention_mask.cuda(),
@@ -214,13 +215,12 @@ def _generate_synthetic_data_angles(batch, device):
 
     # Handle the first token separately as use_cache is False
     # (bsz, seq_len, H)
-    # TODO: Why does it have an extra dim?
-    emb = TensorStorage._cur_sample['token_embedding_first'][0].squeeze(dim=0)
+    emb = TensorStorage._cur_sample['token_embedding_first'][0]
     synthetic_inputs = select(emb, att_mask)
 
     # (bsz, n_blocks + 1, seq_len, H)
     block_outputs = torch.stack([
-        TensorStorage._cur_sample[f'block{block_idx}_first'][0].squeeze(dim=0)
+        TensorStorage._cur_sample[f'block{block_idx}_first'][0]
         for block_idx in range(0, n_blocks + 1)
     ], dim=1)
 

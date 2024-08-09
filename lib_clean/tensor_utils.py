@@ -53,7 +53,8 @@ class TensorStorage:
             path = TensorStorage._get_path(data_root, module_key, TensorStorage.sample_idx)
             path.parent.mkdir(exist_ok=True, parents=True)
             # dim=0 here because we do unsqueeze(0) when appending 
-            torch.save(torch.cat(embeddings, dim=0), path)
+            # torch.save(torch.cat(embeddings, dim=0), path)
+            torch.save(torch.stack(embeddings, dim=0), path)
         
         TensorStorage._cur_sample = dict()
         TensorStorage.sample_idx += 1
@@ -68,7 +69,8 @@ class TensorStorage:
             TensorStorage._cur_sample[module_key] = []
 
         # Do unsqueeze(0) to make sure that the returned tensors are of the same shape as the original hidden states  
-        TensorStorage._cur_sample[module_key].append(data.cpu().unsqueeze(0))
+        # TensorStorage._cur_sample[module_key].append(data.cpu().unsqueeze(0))
+        TensorStorage._cur_sample[module_key].append(data)
         if last_module:
             TensorStorage.token_idx += 1
  
@@ -154,7 +156,7 @@ class ConsecutiveOutputsDataset(Dataset):
         self.total_len = 0
         for block_idx in range(self.per_sample_len):
             for sample_id in range(self.num_samples):
-                slen = self._compute_sample_len(sample_id, block_idx)
+                slen = TensorStorage.get_num_tokens(self.data_root, f'block{block_idx}', sample_id) 
                 sample_lengths[block_idx, sample_id] = slen
                 self.total_len += slen
             
@@ -163,17 +165,6 @@ class ConsecutiveOutputsDataset(Dataset):
 
         self.block_prefix = block_lengths.cumsum(dim=0)
         self.sample_prefix = sample_lengths.cumsum(dim=1) 
-
-    def _compute_sample_len(self, sample_id: int, block_idx: int):
-        '''
-        If there is a tensor file with sample id sample_id and token_id x 
-        then the sample length is at least x 
-        '''
-        sample_len = 0
-        while TensorStorage.get_embedding(self.data_root, sample_id, block_idx, sample_len) is not None: 
-            sample_len += 1
-        
-        return sample_len
 
     def _find_in_prefix(self, prefix: torch.Tensor, value) -> Tuple[int, int]:
         idx = torch.searchsorted(prefix, value, right=True)
@@ -193,11 +184,10 @@ class ConsecutiveOutputsDataset(Dataset):
         ) 
         token_idx = idx - block_offset - sample_offset 
  
-        x  = TensorStorage.get_embedding(self.data_root, sample_idx, start_layer_idx + 0, token_idx)
-        v1 = TensorStorage.get_embedding(self.data_root, sample_idx, start_layer_idx + 1, token_idx)
-        v2 = TensorStorage.get_embedding(self.data_root, sample_idx, start_layer_idx + self.n + 1, token_idx)
         blocks = torch.tensor([start_layer_idx, start_layer_idx + 1, start_layer_idx + self.n + 1], dtype=torch.long) 
-        return x, v1, v2, blocks 
+        block_keys = [f'block{idx}' for idx in blocks]
+        tensors = [TensorStorage.get_embedding(self.data_root, key, sample_idx, token_idx) for key in block_keys]
+        return *tensors, blocks 
 
 class ConsecutiveCosineSimilarities(ConsecutiveOutputsDataset):
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
