@@ -31,7 +31,6 @@ class TrainingObjective:
 class AssistantConfig:
     run_name: str
     teacher_model: str
-    assistant_out: str 
     n_layer: int 
     n_head: int 
     n_embd: int
@@ -42,6 +41,7 @@ class AssistantConfig:
     train_size: int = 500
     test_size: int = 50
     eval_steps: int = 10
+    save_steps: Optional[int] = None 
 
 class MetricTracker:
     def __init__(self, objective: Literal['classification', 'regression'], criterion, n_blocks: int):
@@ -268,8 +268,6 @@ def _generate_synthetic_data_angles(batch, device):
     # X = torch.cat(synthetic_inputs, dim=0).unsqueeze(0)
     # y = torch.cat(synthetic_outputs, dim=0)
     # return X.to(device), y.to(device)
-    print(*[x.shape for x in synthetic_inputs])
-    print(*[x.shape for x in synthetic_outputs])
     return [x.to(device) for x in synthetic_inputs], [x.to(device) for x in synthetic_outputs]
 
 def distillation_loss(student_logits, teacher_logits, per_batch=False, temperature=1.0):
@@ -494,7 +492,28 @@ total_num_tokens = 0
 optim.zero_grad()
 
 train_tracker = MetricTracker(objective_config.objective, criterion, n_blocks)
- 
+
+save_steps = config.save_steps or len(train_loader) + 1
+run_root = Path('./runs').joinpath(config.run_name)
+run_root.mkdir(exist_ok=True, parents=True)
+
+checkpoints_root = run_root.joinpath('checkpoints')
+assistant_out = run_root.joinpath('final') 
+
+def dump_assistant(path: Path):
+    path.mkdir(exist_ok=True, parents=True)
+    torch.save(model.state_dict(), path.joinpath('assistant_state_dict.pt'))
+    with open(path.joinpath('assistant_config.json'), 'w') as cfg_file:
+        # Good for training, no sense in saving it for later
+        cfg.dropout = 0
+        json.dump({
+            'teacher_model': config.teacher_model,
+            'model_cfg': asdict(cfg),
+            'teacher_hidden_size': teacher_model.config.hidden_size,
+            'output_size': n_blocks 
+        }, cfg_file)
+
+
 for step_idx, batch in enumerate(tqdm(train_loader)):
     # X, y = generate_synthetic_data(batch, 'cuda')
     # if X is None:
@@ -539,6 +558,11 @@ for step_idx, batch in enumerate(tqdm(train_loader)):
     optim.step()
     optim.zero_grad()
 
+    if (step_idx + 1) % config.save_steps == 0:
+        checkpoint = checkpoints_root.joinpath(f'checkpoint-{step_idx + 1}')
+        tqdm.write(f'Saving {checkpoint.as_posix()}')
+        dump_assistant(checkpoint)
+
     if (step_idx + 1) % config.eval_steps == 0:
         train_metrics = {
             f'train_{metric}': value 
@@ -556,16 +580,4 @@ for step_idx, batch in enumerate(tqdm(train_loader)):
 
 wandb.finish()
 
-assistant_out = Path(config.assistant_out) 
-assistant_out.mkdir(exist_ok=True, parents=True)
-
-torch.save(model.state_dict(), assistant_out.joinpath('assistant_state_dict.pt'))
-with open(assistant_out.joinpath('assistant_config.json'), 'w') as cfg_file:
-    # Good for training, no sense in saving it for later
-    cfg.dropout = 0
-    json.dump({
-        'teacher_model': config.teacher_model,
-        'model_cfg': asdict(cfg),
-        'teacher_hidden_size': teacher_model.config.hidden_size,
-        'output_size': n_blocks 
-    }, cfg_file)
+dump_assistant(assistant_out)
