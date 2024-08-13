@@ -50,8 +50,8 @@ def get_dataset(name: str, train_size: int, eval_size: int, seed: int):
         test_dataset = None # This has no test set 
     elif name == 'tinystories':
         stories = load_dataset('roneneldan/TinyStories')
-        train_dataset = to_tokenized_dataset(stories['train'], train_size, seed)
-        test_dataset = to_tokenized_dataset(stories['validation'], eval_size, seed)
+        train_dataset = stories['train'].to_iterable_dataset().map(tokenize_function, remove_columns='text', batched=True)
+        test_dataset = stories['validation'].to_iterable_dataset().map(tokenize_function, remove_columns='text', batched=True)
     else:
         slimpajama = load_from_disk(name)
         train_dataset = to_tokenized_dataset(slimpajama, train_size, seed)
