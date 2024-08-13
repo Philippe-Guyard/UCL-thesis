@@ -27,8 +27,32 @@ from transformers import (
 )
 from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
 from transformers.cache_utils import DynamicCache
+from transformers.activations import ACT2FN
 
 from accelerate import PartialState
+
+class SquaredReLU(nn.Module):
+    def __init__(self):
+        super(SquaredReLU, self).__init__()
+        self.relu = nn.ReLU()
+    
+    def forward(self, x):
+        return self.relu(x) ** 2
+
+def replace_activation_with_squared_relu(module, target_activation):
+    """
+    Recursively replace all instances of the target activation function 
+    with SquaredReLU in a given module.
+
+    Parameters:
+    - module: The module to modify.
+    - target_activation: The activation function class to replace (e.g., nn.ReLU).
+    """
+    for name, child in module.named_children():
+        if isinstance(child, target_activation):
+            setattr(module, name, SquaredReLU())
+        else:
+            replace_activation_with_squared_relu(child, target_activation)
 
 def get_opt(model_name: str):
     device_string = PartialState().process_index
@@ -37,15 +61,18 @@ def get_opt(model_name: str):
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     return model, tokenizer
 
-def get_gated_model(model_name: str, with_relu=False):
+def get_gated_model(model_name: str, with_relu=False, with_relu_squared=False):
     config = None 
     if with_relu:
         config = AutoConfig.from_pretrained(model_name)
-        config: Qwen2Config
         config.hidden_act = 'relu'
 
     device_string = PartialState().process_index
     model = AutoModelForCausalLM.from_pretrained(model_name, config=config, device_map={'': device_string})
+    if with_relu_squared:
+        target_act = type(ACT2FN[model.config.hidden_act])
+        replace_activation_with_squared_relu(model, target_act)
+
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     return model, tokenizer
 

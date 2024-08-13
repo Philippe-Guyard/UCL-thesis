@@ -15,8 +15,8 @@ import evaluate
 from models import get_model
 
 def get_trainable_model(model_name: str) -> Tuple[LlamaForCausalLM, LlamaTokenizer]:  
-    assert 'opt' not in model_name, 'OPT models already have relu'
-    model, tokenizer = get_model(model_name, with_relu=True)
+    # assert 'opt' not in model_name, 'OPT models already have relu'
+    model, tokenizer = get_model(model_name, with_relu_squared=True) 
     if tokenizer.pad_token is None:
         tokenizer.add_special_tokens({"pad_token": "[PAD]"})
         model.resize_token_embeddings(len(tokenizer))
