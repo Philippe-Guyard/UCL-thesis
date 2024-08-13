@@ -160,7 +160,7 @@ if __name__ == '__main__':
         df['input_speed'] = input_speeds
         df['output_speed'] = output_speeds
 
-    if config.append:
+    if config.append and Path(config.csv_out).exists():
         df_old = pd.read_csv(config.csv_out, index_col='model_path')
         df = pd.concat([df_old, df]) 
 
