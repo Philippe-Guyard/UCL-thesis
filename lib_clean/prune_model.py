@@ -145,8 +145,8 @@ def simple_prune(model_name: str, target_sparsity: float, data_dir: str):
     # model.config.num_hidden_layers = len(new_layers)
     # return model, tokenizer
 
-def cut_layers_distilloss(model_name: str, target_sparsity: float):
-    def distillation_loss(student_logits, teacher_logits, per_batch=False, temperature=1.0):
+def cut_layers_kldivloss(model_name: str, target_sparsity: float):
+    def kldiv_loss(student_logits, teacher_logits, per_batch=False, temperature=1.0):
         """
         Compute the distillation loss between student and teacher logits.
 
@@ -184,7 +184,7 @@ def cut_layers_distilloss(model_name: str, target_sparsity: float):
             set_decoder_layers(model, orig_layers)
             teacher_logits = model(input_ids, use_cache=False, past_key_values=None).logits.cpu().squeeze(dim=0)
 
-            loss = distillation_loss(student_logits, teacher_logits, per_batch=per_batch, temperature=temperature) 
+            loss = kldiv_loss(student_logits, teacher_logits, per_batch=per_batch, temperature=temperature) 
             losses.append(loss * input_ids.size(1))
         
         if per_batch:
@@ -209,7 +209,107 @@ def cut_layers_distilloss(model_name: str, target_sparsity: float):
     n_layers = len(get_decoder_layers(model))
     n_to_remove = int(target_sparsity * n_layers)
     wikitext = load_dataset("Salesforce/wikitext", "wikitext-103-v1")
-    data = wikitext['train'].select(range(100)).filter(lambda x: len(x) > 0)
+    data = wikitext['train'].select(range(100)).filter(lambda x: len(x['text']) > 0)
+    for iter_idx in range(n_to_remove):
+        print(f'===== Iteration {iter_idx} =====')
+        model_layers = get_decoder_layers(model)
+        idx_to_remove = distil_prune_once(model, tokenizer, data)
+        # Layers are 1-indexed
+        print(f'Removing layer {idx_to_remove + 1}')
+        new_layers = model_layers[:idx_to_remove] + model_layers[idx_to_remove + 1:] 
+        set_decoder_layers(model, new_layers)
+    
+    model.config.num_hidden_layers = n_layers - n_to_remove
+    return model, tokenizer
+
+def cut_layers_distilloss(model_name: str, target_sparsity: float, temperature=1.0, alpha=0.5):
+    def distillation_loss(student_logits, teacher_logits, labels, per_batch=False, temperature=1.0, alpha=0.5):
+        """
+        Compute the combined distillation loss between student and teacher logits,
+        and cross-entropy loss with true labels.
+
+        Parameters:
+        - student_logits: Logits from the student model (tensor of shape [batch_size, vocab_size])
+        - teacher_logits: Logits from the teacher model (tensor of shape [batch_size, vocab_size])
+        - labels: Ground truth labels (tensor of shape [batch_size])
+        - temperature: Temperature for softening the probability distributions
+        - alpha: Weighting factor for balancing the KL divergence and cross-entropy loss
+
+        Returns:
+        - Loss value (scalar tensor)
+        """
+        # Soften the probabilities with temperature
+        student_probs = F.log_softmax(student_logits / temperature, dim=1)
+        teacher_probs = F.softmax(teacher_logits / temperature, dim=1)
+        
+        # Compute the KL divergence loss
+        reduction = 'none' if per_batch else 'batchmean'
+        kldiv_loss = F.kl_div(student_probs, teacher_probs, reduction=reduction)
+        if per_batch:
+            kldiv_loss = kldiv_loss.sum(dim=1)
+        
+        kldiv_loss *= (temperature ** 2)
+        
+        # Compute the cross-entropy loss with true labels
+        cross_entropy_loss = F.cross_entropy(student_logits, labels, reduction='none' if per_batch else 'mean')
+        if per_batch:
+            cross_entropy_loss = cross_entropy_loss.mean(dim=0)
+        
+        # Combine the two losses
+        combined_loss = alpha * kldiv_loss + (1 - alpha) * cross_entropy_loss
+        
+        return combined_loss
+
+    @torch.no_grad()
+    def get_distill_loss(model, tokenizer, orig_layers, new_layers, data, show_tqdm=False, per_batch=False, temperature=1.0, alpha=0.5):
+        data_iter = tqdm(data) if show_tqdm else data
+        losses = []
+        for x in data_iter:
+            tokens = tokenizer(x['text'], truncation=True, return_tensors='pt', max_length=1024)
+            input_ids = tokens.input_ids.cuda()
+            
+            # Shift and squeeze bsz of 1 in labels
+            labels = input_ids[:, 1:].squeeze(dim=0).contiguous()
+            input_ids = input_ids[:, :-1].contiguous()
+            
+            # Compute student logits
+            set_decoder_layers(model, new_layers)
+            student_logits = model(input_ids, use_cache=False, past_key_values=None).logits.squeeze(dim=0)
+
+            # Compute teacher logits
+            set_decoder_layers(model, orig_layers)
+            teacher_logits = model(input_ids, use_cache=False, past_key_values=None).logits.squeeze(dim=0)
+
+            # Calculate distillation loss
+            loss = distillation_loss(student_logits, teacher_logits, labels, per_batch=per_batch, temperature=temperature, alpha=alpha) 
+            # NOTE: Not sure which one is better
+            # losses.append(loss * input_ids.size(1))
+            losses.append(loss.cpu()) 
+        
+        if per_batch:
+            losses = torch.cat(losses, dim=0)
+        else:
+            losses = torch.tensor(losses)
+        
+        return losses
+    
+    def distil_prune_once(model, tokenizer, data):
+        orig_layers = get_decoder_layers(model)
+        losses = torch.zeros(len(orig_layers) - 1)
+        for idx_to_remove in range(len(orig_layers) - 1):
+            new_layers = orig_layers[:idx_to_remove] + orig_layers[idx_to_remove + 1:]
+            losses[idx_to_remove] = get_distill_loss(model, tokenizer, orig_layers, new_layers, data).mean()
+        
+        print('Got losses:', losses)
+        best_idx = losses.argmin()
+        return best_idx
+
+    model, tokenizer = get_model(model_name)
+    n_layers = len(get_decoder_layers(model))
+    n_to_remove = int(target_sparsity * n_layers)
+    wikitext = load_dataset("Salesforce/wikitext", "wikitext-103-v1")
+    data = wikitext['train'].select(range(1000)).filter(lambda x: len(x['text']) > 0)
+    
     for iter_idx in range(n_to_remove):
         print(f'===== Iteration {iter_idx} =====')
         model_layers = get_decoder_layers(model)
@@ -228,6 +328,8 @@ if config.strategy == 'simple':
     model, tokenizer = simple_prune(config.model, config.target_sparsity, config.data_dir) 
 elif config.strategy == 'iterative':
     model, tokenizer = iterative_prune(config.model, config.target_sparsity)
+elif config.strategy == 'iter_kldiv':
+    model, tokenizer = cut_layers_kldivloss(config.model, config.target_sparsity)
 elif config.strategy == 'iter_distil':
     model, tokenizer = cut_layers_distilloss(config.model, config.target_sparsity)
 else:
