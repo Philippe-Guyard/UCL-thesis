@@ -105,8 +105,8 @@ def collect_output_hooks(model, collect_modules=None, save_uncached=False):
         if 'attn' in collect_modules:
             layer_attn_in = layer.temporal_block if hasattr(layer, 'temporal_block') else layer.self_attn 
             layer_attn_out = layer_attn_in
-            layer_attn_in.register_forward_hook(save_data(f'block{layer_idx}_attn_in', save_hidden_states=True), with_kwargs=True)
-            layer_attn_out.register_forward_hook(save_data(f'block{layer_idx}_attn_out', save_output=True), with_kwargs=True)
+            layer_attn_in.register_forward_hook(save_data(f'block{layer_idx}_attn_in', save_hidden_states=True, save_uncached=save_uncached), with_kwargs=True)
+            layer_attn_out.register_forward_hook(save_data(f'block{layer_idx}_attn_out', save_output=True, save_uncached=save_uncached), with_kwargs=True)
         if 'mlp' in collect_modules:
             layer_mlp_in, layer_mlp_out = None, None
             if hasattr(layer, 'mlp_block'):
@@ -122,8 +122,8 @@ def collect_output_hooks(model, collect_modules=None, save_uncached=False):
                 layer_mlp_in = layer.fc1
                 layer_mlp_out = layer.fc2
     
-            layer_mlp_in.register_forward_hook(save_data(f'block{layer_idx}_mlp_in', save_hidden_states=True), with_kwargs=True)
-            layer_mlp_out.register_forward_hook(save_data(f'block{layer_idx}_mlp_out', save_output=True), with_kwargs=True)
+            layer_mlp_in.register_forward_hook(save_data(f'block{layer_idx}_mlp_in', save_hidden_states=True, save_uncached=save_uncached), with_kwargs=True)
+            layer_mlp_out.register_forward_hook(save_data(f'block{layer_idx}_mlp_out', save_output=True, save_uncached=save_uncached), with_kwargs=True)
 
 def collect_output(model_name: str, output_dir: str, collect_modules=None):
     data = get_data(100)
