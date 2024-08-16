@@ -228,6 +228,7 @@ def _generate_synthetic_data_angles(batch, device):
         TensorStorage._cur_sample[f'block{block_idx}_mlp_out_first'][0].reshape(bsz, seq_len, -1)
         for block_idx in range(0, n_blocks)
     ]) 
+
     attn_ins = torch.stack([
         TensorStorage._cur_sample[f'block{block_idx}_attn_in_first'][0]
         for block_idx in range(0, n_blocks)
@@ -236,6 +237,10 @@ def _generate_synthetic_data_angles(batch, device):
         TensorStorage._cur_sample[f'block{block_idx}_attn_out_first'][0]
         for block_idx in range(0, n_blocks)
     ]) 
+
+    # Make sure to account for the residual connection
+    mlp_outs += mlp_ins
+    attn_outs += attn_ins
 
     # (n_blocks, bsz, seq_len)
     mlp_similarities = F.cosine_similarity(
@@ -533,7 +538,8 @@ def dump_assistant(path: Path):
             'teacher_model': config.teacher_model,
             'model_cfg': asdict(cfg),
             'teacher_hidden_size': teacher_model.config.hidden_size,
-            'output_size': n_blocks 
+            'output_size': 2 * n_blocks, 
+            'is_granular': True
         }, cfg_file)
 
 
