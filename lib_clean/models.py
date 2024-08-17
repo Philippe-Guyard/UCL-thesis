@@ -437,11 +437,13 @@ def load_assistant(assistant_config: AssistanceConfig, model: ModelType, model_b
     config: GPTConfig = None 
     teacher_hidden_size = None 
     output_size = None 
+    assistant_is_granular = False
     with open(assistant_path.joinpath('assistant_config.json'), 'r') as cfg_file:
         data = json.load(cfg_file)
         config = GPTConfig(**data['model_cfg'])
         teacher_hidden_size = data['teacher_hidden_size']
         output_size = data['output_size']
+        assistant_is_granular = data.get('is_granular', False)
 
     assistant_model = GPT2ForLayerPruning(config, teacher_hidden_size, output_size) 
     state_dict = torch.load(assistant_path.joinpath('assistant_state_dict.pt'))
@@ -469,13 +471,125 @@ def load_assistant(assistant_config: AssistanceConfig, model: ModelType, model_b
     new_layers = []
     for idx, layer in enumerate(get_decoder_layers(model)):
         if 'llama' in model_basename:
+            assert not assistant_is_granular
             new_layers.append(LlamaSkippableLayer(layer, idx, events))
         elif 'opt' in model_basename:
+            assert not assistant_is_granular
             new_layers.append(OPTSkippableLayer(layer, idx, events))
         elif 'gemma' in model_basename or 'qwen2' in model_basename:
-            new_layers.append(RoPEModelSkippableLayer(layer, idx, events))
+            cls = RoPEModelSkippableLayerGranular if assistant_is_granular else RoPEModelSkippableLayer
+            new_layers.append(cls(layer, idx, events))
         else:
             assert False, 'unknown model basename'
     
     set_decoder_layers(model, nn.ModuleList(new_layers))
+ 
+class GranularSkippableLayerBase(nn.Module):
+    def __init__(self, layer: nn.Module, idx: int, assistant_events: AssistantEvents):
+        super().__init__()
+        self.layer = layer
+        self.events = assistant_events
+        self.layer_idx = idx
+      
+    def nullify_attn(self):
+        raise NotImplementedError()
+
+    def restore_attn(self):
+        raise NotImplementedError()
+
+    def nullify_mlp(self):
+        raise NotImplementedError()
+
+    def restore_mlp(self):
+        raise NotImplementedError()
         
+    def forward(self, *args, **kwargs):
+        if self.layer_idx == 0:
+            # Wait for the computation to finish before processing the first layer
+            self.events.compute_event.synchronize()
+        
+        attn_idx = 2 * self.layer_idx
+        mlp_idx = 2 * self.layer_idx + 1
+        if attn_idx in self.events.skip_layers:
+            assert not kwargs['output_attentions']
+            self.nullify_attn() 
+        if mlp_idx in self.events.skip_layers:
+            self.nullify_mlp()
+
+        out = self.layer(*args, **kwargs)
+        if attn_idx in self.events.skip_layers:
+            # No need to do anything about cache because nullify_attn will return 
+            # a module that automatically updates the past key value if needed
+            self.restore_attn()
+
+        if mlp_idx in self.events.skip_layers:
+            self.restore_mlp()
+
+        return out 
+
+class PassthroughLayer(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, *args, **kwargs):
+        hidden_states = args[0] if len(args) > 0 else kwargs['hidden_states']
+        return hidden_states
+
+class RoPEPassthroughAttention(nn.Module):
+    def __init__(self, attn):
+        super().__init__()
+        self.attn = attn
+    
+    def eval_qkvproj(self, layer_attn, hidden_states):
+        query_states = layer_attn.q_proj(hidden_states)
+        key_states = layer_attn.k_proj(hidden_states)
+        value_states = layer_attn.v_proj(hidden_states)
+        return query_states, key_states, value_states
+
+    def recompute_cache(self, layer_attn, hidden_states, past_key_value, cache_position, position_ids):
+        # =====================================================
+        # Copied from transformers/models/llama/modeling_llama.py with slight modifications 
+        bsz, q_len, _ = hidden_states.size()
+
+        query_states, key_states, value_states = self.eval_qkvproj(layer_attn, hidden_states)
+
+        query_states = query_states.view(bsz, q_len, layer_attn.num_heads, layer_attn.head_dim).transpose(1, 2)
+        key_states = key_states.view(bsz, q_len, layer_attn.num_key_value_heads, layer_attn.head_dim).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, layer_attn.num_key_value_heads, layer_attn.head_dim).transpose(1, 2)
+
+        cos, sin = layer_attn.rotary_emb(value_states, position_ids)
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        # sin and cos are specific to RoPE models; cache_position needed for the static cache
+        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+        key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+        return past_key_value
+
+    def forward(self, *args, **kwargs):
+        hidden_states = args[0] if len(args) > 0 else kwargs['hidden_states']
+        past_key_value = kwargs.get('past_key_value')
+        outputs = (hidden_states)
+        if past_key_value is not None:
+            position_ids = kwargs['position_ids']
+            cache_position = kwargs.get('cache_position', None)
+            past_key_value = self.recompute_cache(self.attn, hidden_states, past_key_value, cache_position, position_ids)
+            outputs += (past_key_value,)
+        
+        return outputs
+    
+class RoPEModelSkippableLayerGranular(GranularSkippableLayerBase):
+    def nullify_mlp(self):
+        self.mlp_old = self.layer.mlp
+        self.layer.mlp = PassthroughLayer() 
+
+    def restore_mlp(self):
+        self.layer.mlp = self.mlp_old
+        self.mlp_old = None 
+
+    def nullify_attn(self):
+        self.attn_old = self.layer.self_attn
+        self.layer.self_attn = RoPEPassthroughAttention(self.attn_old)
+
+    def restore_attn(self):
+        self.layer.self_attn = self.attn_old
+        self.attn_old = None 
