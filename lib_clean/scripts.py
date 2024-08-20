@@ -149,10 +149,14 @@ def time_execution(model_name: str):
         time_execution_hooks(layer, f"Decoder Layer {idx}")
         if hasattr(layer, 'temporal_block'):
             # RecurrentGemma case 
+            assert False
             time_execution_hooks(layer.temporal_block, 'Temporal Block')
         else:
             # Gated models + OPT 
             time_execution_hooks(layer.self_attn, "Self attention")
+            time_execution_hooks(layer.self_attn.q_proj, "q_proj")
+            time_execution_hooks(layer.self_attn.k_proj, "k_proj")
+            time_execution_hooks(layer.self_attn.v_proj, "v_proj")
 
         if hasattr(layer, 'mlp_block'):
             # RecurrentGemma case 

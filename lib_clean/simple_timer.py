@@ -26,11 +26,11 @@ def format_duration_ns(nanoseconds):
 
 def print_durations_summary(key, durations_list: List):
     durations = torch.tensor(durations_list, dtype=torch.float32)
-    mean, std, min, max = (
+    mean, median, std, min, max = (
         format_duration_ns(time_ns) for time_ns in 
-        (durations.mean(), durations.std(), durations.min(), durations.max())
+        (durations.mean(), durations.median(), durations.std(), durations.min(), durations.max())
     )
-    print(f"{key}: Avg = {mean} +- {std}, Min = {min}, Max = {max}")
+    print(f"{key}: Avg = {mean} +- {std}, Median = {median}, Min = {min}, Max = {max}")
 
 class Timer:
     # All times are in ns
