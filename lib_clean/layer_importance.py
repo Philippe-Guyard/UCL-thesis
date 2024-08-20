@@ -62,7 +62,7 @@ for idx in range(all_losses.size(1)):
     print(idx, means[idx])
 
 best_idx = means.argmin()
-worst_idx = means[1:-1].argmin() + 1
+worst_idx = means[1:-1].argmax() + 1
 print(f'Best layer is {best_idx}, worst non-first non-last layer is {worst_idx}')
 
 # %%
@@ -254,26 +254,29 @@ def get_metrics_df(data, layer_idx, key_in, key_out, residual=False, metrics=Non
 
     return df 
 
-# %%
-df = get_metrics_df(data, best_idx, f'block{best_idx}', f'block{best_idx + 1}', metrics=['norm_ratio', 'angular_distance'])
+def save_all(data, layer_idx, suff):
+    df = get_metrics_df(data, layer_idx, f'block{layer_idx}', f'block{layer_idx + 1}', metrics=['norm_ratio', 'angular_distance'])
 
-# %%
-with save_plot('block_norm_ratio.png'):
-    sns.displot(df, x='norm_ratio', hue='category')
+    with save_plot(f'block_norm_ratio_{suff}.png'):
+        sns.displot(df, x='norm_ratio', hue='category')
 
-df = get_metrics_df(data, best_idx, 'block{best_idx}_mlp_in', f'block{best_idx}_mlp_out', metrics=['norm_ratio', 'angular_distance'])
+    df = get_metrics_df(data, layer_idx, 'block{layer_idx}_mlp_in', f'block{layer_idx}_mlp_out', metrics=['norm_ratio', 'angular_distance'])
 
-with save_plot('mlp_norm_ratio.png'):
-    sns.displot(df, x='norm_ratio', hue='category')
-with save_plot('mlp_ang_dist.png'):
-    sns.displot(df, x='angular_distance', hue='category')
+    with save_plot(f'mlp_norm_ratio_{suff}.png'):
+        sns.displot(df, x='norm_ratio', hue='category')
+    with save_plot(f'mlp_ang_dist_{suff}.png'):
+        sns.displot(df, x='angular_distance', hue='category')
 
-df = get_metrics_df(data, best_idx, f'block{best_idx}_atnn_in', f'block{best_idx}_atnn_out', metrics=['norm_ratio', 'angular_distance'])
+    df = get_metrics_df(data, layer_idx, f'block{layer_idx}_atnn_in', f'block{layer_idx}_atnn_out', metrics=['norm_ratio', 'angular_distance'])
 
-with save_plot('attn_norm_ratio.png'):
-    sns.displot(df, x='norm_ratio', hue='category')
-with save_plot('attn_ang_dist.png'):
-    sns.displot(df, x='angular_distance', hue='category')
+    with save_plot(f'attn_norm_ratio_{suff}.png'):
+        sns.displot(df, x='norm_ratio', hue='category')
+    with save_plot(f'attn_ang_dist_{suff}.png'):
+        sns.displot(df, x='angular_distance', hue='category')
+
+save_all(data, best_idx, 'best')
+save_all(data, worst_idx, 'worst')
+
 # %%
 def get_bestk_losses(all_losses, k):
     indices = torch.topk(all_losses, k, largest=False).indices
