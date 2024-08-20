@@ -1,7 +1,7 @@
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Literal, Optional
 
 from tensor_utils import TensorStorage
 from simple_timer import CudaTimer as Timer
@@ -23,6 +23,8 @@ class MainConfig:
     collect_output: bool 
     benchmark: bool
     output_dir: Optional[str] = field(default=None)
+    only_forward: Optional[bool] = False
+    data_size: Literal['all', 'small', 'medium', 'large'] = 'all'
 
 
 def get_data(n_examples: int):
@@ -30,7 +32,8 @@ def get_data(n_examples: int):
     return wikitext["train"].select(range(2 * n_examples))
 
 @torch.no_grad
-def run_once(data, model: ModelType, tokenizer: PreTrainedTokenizer, tokens_per_sample=50, tensor_storage_dir=None):
+def run_once(data, model: ModelType, tokenizer: PreTrainedTokenizer,
+             tokens_per_sample=50, tensor_storage_dir=None, only_forward_passes=True):
     assert torch.cuda.is_available()
     device = "cuda"
     model.eval()
@@ -47,16 +50,20 @@ def run_once(data, model: ModelType, tokenizer: PreTrainedTokenizer, tokens_per_
         input_ids = tensors.input_ids.to(device)
         attention_mask = tensors.attention_mask.to(device)
 
-        _ = model.generate(
-            input_ids,
-            attention_mask=attention_mask,
-            max_new_tokens=tokens_per_sample + 1,
-            do_sample=True,
-            top_k=50,
-            top_p=0.95,
-            eos_token_id=tokenizer.eos_token_id,
-            pad_token_id=tokenizer.eos_token_id
-        )
+        if only_forward_passes:
+            _ = model(input_ids, attention_mask=attention_mask)
+        else:
+            _ = model.generate(
+                input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=tokens_per_sample + 1,
+                do_sample=True,
+                top_k=50,
+                top_p=0.95,
+                eos_token_id=tokenizer.eos_token_id,
+                pad_token_id=tokenizer.eos_token_id
+            )
+
         if tensor_storage_dir is not None:
             TensorStorage.commit_sample(tensor_storage_dir)
 
@@ -132,15 +139,45 @@ def collect_output(model_name: str, output_dir: str, collect_modules=None):
 
     run_once(data, model, tokenizer, tensor_storage_dir=Path(output_dir))
 
-def time_execution(model_name: str):
+def time_execution(model_name: str, prompt_size: str, only_forward: bool):
     def time_execution_hooks(layer: nn.Module, timer_key: str):
         layer.register_forward_pre_hook(lambda *args: Timer.register(timer_key))
         layer.register_forward_hook(lambda *args: Timer.commit(timer_key))
 
+    def count_tokens(tokenizer):
+        def f(example):
+            return {'num_tokens': len(tokenizer.tokenize(example['text']))}
+        
+        return f
+
+    warmup_size = 10
+    data_size = 100 
+    if only_forward:
+        warmup_size *= 10
+        data_size *= 10
+
     # Benchmarks execution time of different parts of the model 
-    warmup_data = get_data(10)
-    data = get_data(100)
+    warmup_data = get_data(warmup_size)
+
     model, tokenizer = get_model(model_name) 
+    min_num_tokens = {
+        'all': 1,
+        'small': 50,
+        'medium': 240,
+        'large': 1000
+    }
+    max_num_tokens = {
+        'all': 2048,
+        'small': 60,
+        'medium': 260,
+        'large': 1100,
+    }
+    data = (
+        load_dataset("Salesforce/wikitext", "wikitext-103-v1")['train']
+        .map(count_tokens(tokenizer))
+        .filter(lambda example: min_num_tokens[prompt_size] <= example['num_tokens'] <= max_num_tokens[prompt_size])
+        .select(range(data_size))
+    )
     # Warmup run
     run_once(warmup_data, model, tokenizer)
 
@@ -171,7 +208,7 @@ def time_execution(model_name: str):
             time_execution_hooks(layer.activation_fn, "MLP activation")
 
     # Real run
-    run_once(data, model, tokenizer)
+    run_once(data, model, tokenizer, only_forward_passes=only_forward)
     Timer.print()
 
 
@@ -294,7 +331,7 @@ def benchmark(model_name: str, assistance_config: AssistanceConfig, use_cache=Tr
 if __name__ == '__main__':
     config, assistance_config = HfArgumentParser((MainConfig, AssistanceConfig)).parse_args_into_dataclasses()
     if config.time_execution:
-        time_execution(config.model_name)
+        time_execution(config.model_name, config.data_size, config.only_forward)
     if config.collect_output:
         assert config.output_dir is not None 
         collect_output(config.model_name, config.output_dir)
