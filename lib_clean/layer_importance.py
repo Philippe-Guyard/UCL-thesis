@@ -260,7 +260,7 @@ def save_all(data, layer_idx, suff):
     with save_plot(f'block_norm_ratio_{suff}.png'):
         sns.displot(df, x='norm_ratio', hue='category')
 
-    df = get_metrics_df(data, layer_idx, 'block{layer_idx}_mlp_in', f'block{layer_idx}_mlp_out', metrics=['norm_ratio', 'angular_distance'])
+    df = get_metrics_df(data, layer_idx, f'block{layer_idx}_mlp_in', f'block{layer_idx}_mlp_out', metrics=['norm_ratio', 'angular_distance'])
 
     with save_plot(f'mlp_norm_ratio_{suff}.png'):
         sns.displot(df, x='norm_ratio', hue='category')
