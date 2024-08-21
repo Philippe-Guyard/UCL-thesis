@@ -1,6 +1,6 @@
 # %%
 from scripts import get_data
-from models import get_model, get_decoder_layers
+from models import get_model, get_decoder_layers, set_decoder_layers
 import torch
 import torch.nn as nn 
 import torch.nn.functional as F
@@ -21,17 +21,13 @@ def save_plot(filepath):
     try:
         yield fig  # Yield the figure for plotting
     finally:
-        fig.savefig(ROOT_FOLDER.joinpath(filepath))  # Save the figure
+        plt.savefig(ROOT_FOLDER.joinpath(filepath))  # Save the figure
         plt.close(fig)  # Close the figure
 
 # %%
 model, tokenizer = get_model('facebook/opt-125m')
-data = get_data(75)
+data = get_data(100)
 data = data.filter(lambda x: len(x['text']) > 0) 
-
-# %%
-model
-
 # %%
 @torch.no_grad()
 def get_angular_dist(model, data, skip_layers=1): 
@@ -260,14 +256,14 @@ def save_all(data, layer_idx, suff):
     with save_plot(f'block_norm_ratio_{suff}.png'):
         sns.displot(df, x='norm_ratio', hue='category')
 
-    df = get_metrics_df(data, layer_idx, f'block{layer_idx}_mlp_in', f'block{layer_idx}_mlp_out', metrics=['norm_ratio', 'angular_distance'])
+    df = get_metrics_df(data, layer_idx, f'block{layer_idx}_mlp_in', f'block{layer_idx}_mlp_out', metrics=['norm_ratio', 'angular_distance'], residual=True)
 
     with save_plot(f'mlp_norm_ratio_{suff}.png'):
         sns.displot(df, x='norm_ratio', hue='category')
     with save_plot(f'mlp_ang_dist_{suff}.png'):
         sns.displot(df, x='angular_distance', hue='category')
 
-    df = get_metrics_df(data, layer_idx, f'block{layer_idx}_atnn_in', f'block{layer_idx}_atnn_out', metrics=['norm_ratio', 'angular_distance'])
+    df = get_metrics_df(data, layer_idx, f'block{layer_idx}_attn_in', f'block{layer_idx}_attn_out', metrics=['norm_ratio', 'angular_distance'], residual=True)
 
     with save_plot(f'attn_norm_ratio_{suff}.png'):
         sns.displot(df, x='norm_ratio', hue='category')
@@ -277,23 +273,128 @@ def save_all(data, layer_idx, suff):
 save_all(data, best_idx, 'best')
 save_all(data, worst_idx, 'worst')
 
-# %%
+def distillation_loss(student_logits, teacher_logits, per_batch=False, temperature=1.0):
+    """
+    Compute the distillation loss between student and teacher logits.
+
+    Parameters:
+    - student_logits: Logits from the student model (tensor of shape [batch_size, vocab_size])
+    - teacher_logits: Logits from the teacher model (tensor of shape [batch_size, vocab_size])
+    - temperature: Temperature for softening the probability distributions
+
+    Returns:
+    - Loss value (scalar tensor)
+    """
+    # Soften the probabilities with temperature
+    student_probs = F.log_softmax(student_logits / temperature, dim=1)
+    teacher_probs = F.softmax(teacher_logits / temperature, dim=1)
+    
+    # Compute the KL divergence loss
+    reduction = 'none' if per_batch else 'batchmean'
+    kldiv_loss = F.kl_div(student_probs, teacher_probs, reduction=reduction)
+    if per_batch:
+        kldiv_loss = kldiv_loss.sum(dim=1)
+    
+    kldiv_loss *= (temperature ** 2)
+    return kldiv_loss
+
+class PassthroughMLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, *args, **kwargs):
+        hidden_states = args[0] if len(args) > 0 else kwargs['hidden_states']
+        return hidden_states
+
+class PassthroughAttn(nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, *args, **kwargs):
+        hidden_states = args[0] if len(args) > 0 else kwargs['hidden_states']
+        return (hidden_states, None, None)
+
+@torch.no_grad()
+def get_distill_loss(model, data, sublayer_indices, prune_sublayer='mlp', show_tqdm=False, per_batch=False, cat=True, temperature=1.0):
+    data_iter = tqdm(data) if show_tqdm else data
+    losses = []
+    orig_sublayers = [getattr(x, prune_sublayer) for x in get_decoder_layers(model)]
+    for x in data_iter:
+        tokens = tokenizer(x['text'], truncation=True, return_tensors='pt', max_length=2048)
+        input_ids = tokens.input_ids.cuda()
+        for layer in get_decoder_layers(model):
+            new_val = PassthroughMLP() if prune_sublayer == 'mlp' else PassthroughAttn()
+            setattr(layer, prune_sublayer, new_val)
+
+        student_logits = model(input_ids).logits.cpu().squeeze(dim=0)
+
+        for idx, layer in enumerate(get_decoder_layers(model)):
+            setattr(layer, prune_sublayer, orig_sublayers[idx])
+
+        teacher_logits = model(input_ids).logits.cpu().squeeze(dim=0)
+        losses.append(distillation_loss(student_logits, teacher_logits, per_batch=per_batch, temperature=temperature))        
+    
+    if per_batch:
+        if cat:
+            losses = torch.cat(losses, dim=0)
+    else:
+        losses = torch.tensor(losses)
+    
+    return losses
+
 def get_bestk_losses(all_losses, k):
     indices = torch.topk(all_losses, k, largest=False).indices
     list_of_sets = [frozenset(row.tolist()) for row in indices]
     c = Counter(list_of_sets)
-    indices_to_remove = c.most_common(1)[0][0]
-    orig_layers = get_decoder_layers(model)
-    removed_was_best = torch.tensor([x == indices_to_remove for x in list_of_sets])
-    return c, removed_was_best
+    return c
 
 # %%
-c, removed_was_best = get_bestk_losses(all_losses, 1)
+c = get_bestk_losses(all_losses, 1)
 
-# %%
 print(c.most_common(10))
 
-# %%
+c = get_bestk_losses(all_losses, 3)
+
+print(c.most_common(10))
+
+def get_sublayer_losses(data, prune_sublayer='mlp'):
+    sublayer_losses = torch.zeros(all_losses)
+    for idx in range(all_losses.size(0)):
+        tokens = get_tokens(data, idx)
+        for block_idx in range(all_losses.size(1)):
+            key_in = f'block{block_idx}_{prune_sublayer}_in'
+            key_out = f'block{block_idx}_{prune_sublayer}_out'
+            ang_dist = torch.arccos(F.cosine_similarity(tokens[key_in], tokens[key_out]), dim=-1)
+            ang_dist = (ang_dist / torch.pi).item() 
+            sublayer_losses[idx, block_idx] = ang_dist
+
+    return sublayer_losses
+
+def get_bestk_losses(all_losses, k, prune_sublayer='mlp'):
+    indices = torch.topk(all_losses, k, largest=False).indices
+    list_of_sets = [frozenset(row.tolist()) for row in indices]
+    c = Counter(list_of_sets)
+    indices_to_remove = c.most_common(1)[0][0]
+    distil_losses = get_distill_loss(model, data, indices_to_remove, prune_sublayer=prune_sublayer, per_batch=True)
+    removed_was_best = torch.tensor([x == indices_to_remove for x in list_of_sets])
+    return distil_losses[removed_was_best]
 
 
+mlp_losses = get_sublayer_losses(model, data, 'mlp')
+attn_losses = get_sublayer_losses(model, data, 'attn')
 
+def plot_losses(losses):
+    # remove outliers
+    sns.displot(losses[losses < losses.quantile(0.95)])
+
+with save_plot('mlp_1_loss.png'):
+    plot_losses(get_bestk_losses(mlp_losses, 1, prune_sublayer='mlp'))
+
+with save_plot('mlp_3_loss.png'):
+    plot_losses(get_bestk_losses(mlp_losses, 3, prune_sublayer='mlp'))
+
+with save_plot('attn_1_loss.png'):
+    plot_losses(get_bestk_losses(attn_losses, 1, prune_sublayer='self_attn'))
+
+with save_plot('attn_3_loss.png'):
+    plot_losses(get_bestk_losses(attn_losses, 3, prune_sublayer='self_attn'))
