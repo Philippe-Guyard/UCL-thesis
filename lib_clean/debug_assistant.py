@@ -13,8 +13,8 @@ from models import AssistanceConfig, AssistantEvents, get_decoder_layers, get_mo
 from datasets import load_dataset
 
 
-assistant_path = Path('./tmp_assistant')
-model_path = 'facebook/opt-125m'
+assistant_path = Path('./runs/gemma_assistant_p100_new/final')
+model_path = 'google/gemma-2b'
 
 model, tokenizer = get_model(model_path)
 n_blocks = len(get_decoder_layers(model))
@@ -75,9 +75,11 @@ def print_metric(y_true, y_pred, k=3):
     top_k_pred_at_true_indices = y_pred.gather(1, top_k_true_indices)
     top_k_mse = torch.mean((top_k_pred_at_true_indices - top_k_true_values) ** 2).item()
     
-    mse = torch.mean((y_true - y_pred) ** 2)
+    mse = torch.mean((y_true[top_k_true_indices] - y_pred[top_k_pred_indices]) ** 2)
 
     # Print the results
+    print(f'y_true: {[round(x, 3) for x in y_true.view(-1).tolist()]}')
+    print(f'y_pred: {[round(x, 3) for x in y_pred.view(-1).tolist()]}')
     print(f'{k} best layers (true indices): {top_k_true_indices.tolist()}')
     print(f'{k} best predicted layers (predicted indices): {top_k_pred_indices.tolist()}')
     print(f'MSE at true indices: {mse}')
@@ -85,7 +87,7 @@ def print_metric(y_true, y_pred, k=3):
 
 with torch.no_grad():
     for idx, x in enumerate(train_data):
-        print('=' * 20)
+        print('=' * 30)
         print(f'Datapoint {idx}')
         tokens = tokenizer(x['text'], return_tensors='pt', max_length=2048, truncation=True)
 
@@ -102,6 +104,7 @@ with torch.no_grad():
         )
         tokens_generated = output.size(1) - tokens.input_ids.size(1)
 
+        print('=' * 10)
         print('Token 0')
         X = TensorStorage._cur_sample['token_embedding_first'][0].squeeze(dim=0).cuda()
         block_outputs = torch.stack([
