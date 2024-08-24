@@ -7,8 +7,9 @@ import torch.nn.functional as F
 
 from gpt import GPT2ForLayerPruning, GPTConfig
 from scripts import collect_output_hooks
+from simple_histogram import SimpleHistogram
 from tensor_utils import TensorStorage
-from models import get_decoder_layers, get_model
+from models import AssistanceConfig, AssistantEvents, get_decoder_layers, get_model
 from datasets import load_dataset
 
 
@@ -48,11 +49,21 @@ with open(assistant_path.joinpath('assistant_config.json'), 'r') as cfg_file:
     teacher_hidden_size = data['teacher_hidden_size']
     output_size = data['output_size']
 
+histograms_dir = assistant_path.joinpath('histograms')
+histograms = None
+if histograms_dir.exists():
+    n_layers = len(get_decoder_layers(model))
+    histograms = [SimpleHistogram() for _ in range(n_layers)]
+    for idx, hist in enumerate(histograms):
+        hist.load_from_file(histograms_dir.joinpath(f'histogram_{idx}.npy'))
+
 assistant_model = GPT2ForLayerPruning(config, teacher_hidden_size, output_size) 
 state_dict = torch.load(assistant_path.joinpath('assistant_state_dict.pt'))
 assistant_model.load_state_dict(state_dict)
 assistant_model.eval()
 assistant_model = assistant_model.cuda()
+
+events = AssistantEvents(assistant_model, AssistanceConfig('', prune_nlayers=4), use_cache=False, histograms=histograms)
 
 collect_output_hooks(model, save_uncached=True, collect_modules={'token_embedding', 'block'})
 
@@ -100,8 +111,13 @@ with torch.no_grad():
         cos_similarities = F.cosine_similarity(block_outputs[:-1], block_outputs[1:], dim=-1).transpose(0, 1)
         cos_similarities = torch.clamp(cos_similarities, -1.0, 1.0)
         y_true = (torch.acos(cos_similarities) / torch.pi)[-1].unsqueeze(0)
-        y_pred = assistant_model(X).cpu()
+        events.compute_scores(X)
+        events.compute_event.synchronize()
+        y_pred = events.scores.cpu()
+        # y_pred = assistant_model(X).cpu()
         print_metric(y_true, y_pred)
+        skip_layers = events.compute_skip_layers() 
+        print('Predicted skip layers:', skip_layers)
         for token_idx in range(tokens_generated - 1):
             print(f'Token {token_idx + 1}')
             delta_x = TensorStorage._cur_sample['token_embedding'][token_idx][0].cuda()
@@ -115,6 +131,7 @@ with torch.no_grad():
             cos_similarities = torch.clamp(cos_similarities, -1.0, 1.0) 
             angular_distances = torch.acos(cos_similarities) / torch.pi
             y_true = angular_distances.unsqueeze(0)
+
             y_pred = assistant_model(X).cpu()
             print_metric(y_true, y_pred)
 

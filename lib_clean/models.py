@@ -465,6 +465,14 @@ def load_assistant(assistant_config: AssistanceConfig, model: ModelType, model_b
         output_size = data['output_size']
         assistant_is_granular = data.get('is_granular', False)
 
+    histograms_dir = assistant_path.joinpath('histograms')
+    histograms = None
+    if histograms_dir.exists():
+        n_layers = len(get_decoder_layers(model))
+        histograms = [SimpleHistogram() for _ in range(n_layers)]
+        for idx, hist in enumerate(histograms):
+            hist.load_from_file(histograms_dir.joinpath(f'histogram_{idx}.npy'))
+
     assistant_model = GPT2ForLayerPruning(config, teacher_hidden_size, output_size) 
     state_dict = torch.load(assistant_path.joinpath('assistant_state_dict.pt'))
     assistant_model.load_state_dict(state_dict)
@@ -475,7 +483,7 @@ def load_assistant(assistant_config: AssistanceConfig, model: ModelType, model_b
     embedding = get_token_embedding(model)
     # In case we are doing mixed precision inference
     assistant_model = assistant_model.to(dtype=embedding.weight.dtype)
-    events = AssistantEvents(assistant_model, assistant_config, use_cache=assistant_use_cache)
+    events = AssistantEvents(assistant_model, assistant_config, use_cache=assistant_use_cache, histograms=histograms)
 
     def generate_decorator(f, events: AssistantEvents):
         def wrapper(*args, **kwargs):
