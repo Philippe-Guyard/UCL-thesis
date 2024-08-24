@@ -556,9 +556,10 @@ class PassthroughLayer(nn.Module):
         return hidden_states
 
 class RoPEPassthroughAttention(nn.Module):
-    def __init__(self, attn):
+    def __init__(self, attn, layer_idx):
         super().__init__()
         self.attn = attn
+        self.layer_idx = layer_idx
     
     def eval_qkvproj(self, layer_attn, hidden_states):
         query_states = layer_attn.q_proj(hidden_states)
@@ -588,13 +589,12 @@ class RoPEPassthroughAttention(nn.Module):
     def forward(self, *args, **kwargs):
         hidden_states = args[0] if len(args) > 0 else kwargs['hidden_states']
         past_key_value = kwargs.get('past_key_value')
-        outputs = (hidden_states)
         if past_key_value is not None:
             position_ids = kwargs['position_ids']
             cache_position = kwargs.get('cache_position', None)
             past_key_value = self.recompute_cache(self.attn, hidden_states, past_key_value, cache_position, position_ids)
-            outputs += (past_key_value,)
-        
+
+        outputs = (hidden_states, None, past_key_value) 
         return outputs
     
 class RoPEModelSkippableLayerGranular(GranularSkippableLayerBase):
@@ -608,7 +608,7 @@ class RoPEModelSkippableLayerGranular(GranularSkippableLayerBase):
 
     def nullify_attn(self):
         self.attn_old = self.layer.self_attn
-        self.layer.self_attn = RoPEPassthroughAttention(self.attn_old)
+        self.layer.self_attn = RoPEPassthroughAttention(self.attn_old, self.layer_idx)
 
     def restore_attn(self):
         self.layer.self_attn = self.attn_old
