@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 import warnings
 
 from gpt import GPT2ForLayerPruning, GPTConfig
@@ -30,6 +30,8 @@ from transformers.cache_utils import DynamicCache
 from transformers.activations import ACT2FN
 
 from accelerate import PartialState
+
+from simple_histogram import SimpleHistogram
 
 class SquaredReLU(nn.Module):
     def __init__(self):
@@ -192,7 +194,8 @@ class AssistanceConfig:
     prune_maxlayers: Optional[int] = None 
 
 class AssistantEvents:
-    def __init__(self, model: GPT2ForLayerPruning, config: AssistanceConfig, use_cache: bool) -> None:
+    def __init__(self, model: GPT2ForLayerPruning, config: AssistanceConfig, use_cache: bool,
+                 histograms: Optional[List[SimpleHistogram]]=None) -> None:
         self.skip_layers = set()
         self.model = model
         # Perform the computation asynchronously 
@@ -200,27 +203,44 @@ class AssistantEvents:
         self.compute_event = torch.cuda.Event()
         self.config = config
         self.cache = DynamicCache() if use_cache else None
+        self.histograms = histograms
+        self.scores = None
 
-    def compute_skip_layers(self, hidden_states):
+    def compute_skip_layers(self):
+        assert self.scores is not None
+        # Need to move them to cpu and convert to set for much faster access 
+        # (to check layer_idx in skip_layers)
+        if self.config.prune_nlayers is not None:
+            skip_indices = torch.topk(self.scores, self.config.prune_nlayers, largest=False).indices
+            skip_indices = skip_indices.indices
+        else:
+            skip_indices = torch.nonzero(self.scores < self.config.prune_ndist).view(-1)
+            if self.config.prune_maxlayers is not None and skip_indices.size(0) > self.config.prune_maxlayers:
+                new_scores = self.scores[skip_indices]
+                best_indices = torch.topk(new_scores, self.config.prune_maxlayers, largest=False).indices
+                # NOTE: Best indices is in the space of [0, len(skip_indices)) and not [0, n_layers)
+                skip_indices = skip_indices[best_indices]
+
+        self.skip_layers = set(skip_indices.cpu().numpy())
+        if self.histograms is not None:
+            # Approach 1: Skip at most prune_maxlayers, only skip layers
+            # that are predicted to be the top 25% of their dist distribution 
+            for idx in self.skip_layers:
+                if self.histograms[idx].inv_quantile(self.scores[idx]) > 0.25:
+                    self.skip_layers.remove(idx)
+            # Approach 2: SKip at most prune_maxlayers, skip all layers where 
+            # predicted distribution is better than median of best layer 
+            # TODO
+            # for idx in self.skip_layers:
+            #     pass
+
+        self.scores = None
+
+    def compute_scores(self, hidden_states):
         # Perform the computation on a separate CUDA stream
         with torch.cuda.stream(self.compute_stream):
             # NOTE: self.cache is None when use_cache=False, so safe to pass
-            scores = self.model(hidden_states, cache=self.cache).squeeze().abs()
-            # Need to move them to cpu and convert to set for much faster access 
-            # (to check layer_idx in skip_layers)
-            if self.config.prune_nlayers is not None:
-                skip_indices = torch.topk(scores, self.config.prune_nlayers, largest=False)
-                skip_indices = skip_indices.indices
-            else:
-                skip_indices = torch.nonzero(scores < self.config.prune_ndist).view(-1)
-                if self.config.prune_maxlayers is not None and skip_indices.size(0) > self.config.prune_maxlayers:
-                    new_scores = scores[skip_indices]
-                    best_indices = torch.topk(new_scores, self.config.prune_maxlayers, largest=False).indices
-                    # NOTE: Best indices is in the space of [0, len(skip_indices)) and not [0, n_layers)
-                    skip_indices = skip_indices[best_indices]
-
-            self.skip_layers = set(skip_indices.cpu().numpy())
-            
+            self.scores = self.model(hidden_states, cache=self.cache).squeeze().abs() 
             # Record the event to signal the end of computation
             self.compute_event.record(self.compute_stream)
     
@@ -384,7 +404,7 @@ class EnrichedEmbedding(nn.Module):
     def forward(self, *args, **kwargs):
         hidden_states = self.emb(*args, **kwargs)
         assert hidden_states.size(0) == 1, 'Batch size > 1 not supported yet'
-        self.events.compute_skip_layers(hidden_states)
+        self.events.compute_scores(hidden_states)
         
         return hidden_states 
 

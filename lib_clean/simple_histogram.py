@@ -25,7 +25,7 @@ class SimpleHistogram:
     def get_histogram(self):
         return self.histogram 
 
-    def compute_quantile(self, value):
+    def inv_quantile(self, value):
         """Compute the quantile of a given number based on the histogram."""
         if value < self.min_range:
             return 0.0
@@ -38,6 +38,20 @@ class SimpleHistogram:
         total_counts = self.cumsum[-1]
         cdf_value = self.cumsum[bin_index - 1] / total_counts if bin_index > 0 else 0.0
         return cdf_value
+
+    def quantile(self, quantile):
+        """Compute the quantile value from the histogram."""
+        if not (0 <= quantile <= 1):
+            raise ValueError("Quantile should be between 0 and 1.")
+
+        cumulative_counts = self.cumsum 
+        total_counts = cumulative_counts[-1]
+        target_count = quantile * total_counts
+
+        # Find the first bin where the cumulative count exceeds the target count
+        bin_index = np.searchsorted(cumulative_counts, target_count)
+        quantile_value = self.min_range + bin_index * self.precision
+        return quantile_value
 
     def dump_to_file(self, filename):
         """Save the histogram data to a file."""
