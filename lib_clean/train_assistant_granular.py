@@ -4,6 +4,7 @@ from pathlib import Path
 import time
 from typing import Literal, Optional
 
+from lib_clean.simple_histogram import SimpleHistogram
 from models import get_model, get_decoder_layers, set_decoder_layers
 from scripts import collect_output_hooks
 from tensor_utils import TensorStorage
@@ -520,6 +521,7 @@ total_num_tokens = 0
 optim.zero_grad()
 
 train_tracker = MetricTracker(objective_config.objective, criterion, 2 * n_blocks)
+distributions = [SimpleHistogram() for _ in range(2 * n_blocks)]
 
 save_steps = config.save_steps or len(train_loader) + 1
 run_root = Path('./runs').joinpath(config.run_name)
@@ -542,6 +544,12 @@ def dump_assistant(path: Path):
             'is_granular': True
         }, cfg_file)
 
+def dump_distributtions(path: Path):
+    root_path = path.joinpath('histograms')
+    root_path.mkdir(exist_ok=True, parents=True)
+    for idx, hist in enumerate(distributions):
+        hist_path = root_path.joinpath(f'histogram_{idx}.npy')
+        hist.dump_to_file(hist_path)
 
 for step_idx, batch in enumerate(tqdm(train_loader)):
     # X, y = generate_synthetic_data(batch, 'cuda')
@@ -558,6 +566,10 @@ for step_idx, batch in enumerate(tqdm(train_loader)):
     X_lst, y_lst = batch 
     total_loss = 0
     for X, y in zip(X_lst, y_lst):
+        for y_batch in y:
+            for idx, y_val in enumerate(y_batch):
+                distributions[idx].update(y_val)
+
         preds = model(X.unsqueeze(0), training=True).squeeze()
         train_tracker.update(y, preds)
         num_tokens = y.size(0)
@@ -591,6 +603,7 @@ for step_idx, batch in enumerate(tqdm(train_loader)):
         checkpoint = checkpoints_root.joinpath(f'checkpoint-{step_idx + 1}')
         tqdm.write(f'Saving {checkpoint.as_posix()}')
         dump_assistant(checkpoint)
+        dump_distributtions(checkpoint)
 
     if (step_idx + 1) % config.eval_steps == 0:
         train_metrics = {
@@ -610,3 +623,4 @@ for step_idx, batch in enumerate(tqdm(train_loader)):
 wandb.finish()
 
 dump_assistant(assistant_out)
+dump_distributtions(checkpoint)
