@@ -205,6 +205,13 @@ class AssistantEvents:
         self.cache = DynamicCache() if use_cache else None
         self.histograms = histograms
         self.scores = None
+        
+        if self.histograms is not None:
+            # cutoff = median for all 
+            # self.cutoffs = [h.quantile(0.5) for h in self.histograms]
+            # cutoff = 0.75 of best layer
+            best_cutoff = min([h.quantile(0.75) for h in self.histograms])
+            self.cutoffs = [best_cutoff] * len(self.histograms)
 
     def compute_skip_layers(self):
         assert self.scores is not None
@@ -212,7 +219,6 @@ class AssistantEvents:
         # (to check layer_idx in skip_layers)
         if self.config.prune_nlayers is not None:
             skip_indices = torch.topk(self.scores, self.config.prune_nlayers, largest=False).indices
-            skip_indices = skip_indices.indices
         else:
             skip_indices = torch.nonzero(self.scores < self.config.prune_ndist).view(-1)
             if self.config.prune_maxlayers is not None and skip_indices.size(0) > self.config.prune_maxlayers:
@@ -225,16 +231,15 @@ class AssistantEvents:
         if self.histograms is not None:
             # Approach 1: Skip at most prune_maxlayers, only skip layers
             # that are predicted to be the top 25% of their dist distribution 
+            to_remove = set()
             for idx in self.skip_layers:
-                if self.histograms[idx].inv_quantile(self.scores[idx]) > 0.25:
-                    self.skip_layers.remove(idx)
-            # Approach 2: SKip at most prune_maxlayers, skip all layers where 
-            # predicted distribution is better than median of best layer 
-            # TODO
-            # for idx in self.skip_layers:
-            #     pass
+                if self.scores[idx] > self.cutoffs[idx]: 
+                    to_remove.add(idx)
+
+            self.skip_layers -= to_remove
 
         self.scores = None
+        return self.skip_layers
 
     def compute_scores(self, hidden_states):
         # Perform the computation on a separate CUDA stream
@@ -268,6 +273,7 @@ class SkippableLayerBase(nn.Module):
         if self.layer_idx == 0:
             # Wait for the computation to finish before processing the first layer
             self.events.compute_event.synchronize()
+            self.events.compute_skip_layers()
         
         if self.layer_idx in self.events.skip_layers:
             # (hidden_states, past_key_values)
@@ -483,9 +489,11 @@ def load_assistant(assistant_config: AssistanceConfig, model: ModelType, model_b
     histograms = None
     if histograms_dir.exists():
         n_layers = len(get_decoder_layers(model))
-        histograms = [SimpleHistogram() for _ in range(n_layers)]
+        n_hists = 2 * n_layers if assistant_is_granular else n_layers
+        histograms = [SimpleHistogram() for _ in range(n_hists)]
         for idx, hist in enumerate(histograms):
             hist.load_from_file(histograms_dir.joinpath(f'histogram_{idx}.npy'))
+            hist = hist.for_reading()
 
     assistant_model = GPT2ForLayerPruning(config, teacher_hidden_size, output_size) 
     state_dict = torch.load(assistant_path.joinpath('assistant_state_dict.pt'))
@@ -551,6 +559,7 @@ class GranularSkippableLayerBase(nn.Module):
         if self.layer_idx == 0:
             # Wait for the computation to finish before processing the first layer
             self.events.compute_event.synchronize()
+            self.events.compute_skip_layers()
         
         attn_idx = 2 * self.layer_idx
         mlp_idx = 2 * self.layer_idx + 1
