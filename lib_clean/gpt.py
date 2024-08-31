@@ -187,7 +187,7 @@ class GPT2ForLayerPruning(nn.Module):
         self.out_head = nn.Linear(config.n_embd, output_size)
         self.blocks = nn.ModuleList([Block(config, idx) for idx in range(config.n_layer)])
     
-    def forward(self, input_embeds, training=False, cache: Optional[Cache]=None):
+    def forward(self, input_embeds, training=False, cache: Optional[Cache]=None, return_block_embed=False):
         # input_embeds: (batch_size, seq_len, hidden_size)
         block_embed = self.emb_head(input_embeds)
         if cache is None or cache.get_seq_length() == 0:
@@ -206,7 +206,11 @@ class GPT2ForLayerPruning(nn.Module):
             # Unless required for training, apply the out head only to the last prediction 
             block_embed = block_embed[:, -1, :]
 
-        return self.out_head(block_embed) 
+        out = self.out_head(block_embed)
+        if return_block_embed:
+            return (out, block_embed)
+        else:
+            return out 
 
     def configure_optimizers(self, weight_decay, learning_rate, device_type):
         param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}

@@ -25,7 +25,7 @@ from transformers import (
     RecurrentGemmaConfig,
     RecurrentGemmaForCausalLM
 )
-from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
+from transformers.models.llama.modeling_llama import apply_rotary_pos_emb as apply_llama_rotary_pos_emb
 from transformers.cache_utils import DynamicCache
 from transformers.activations import ACT2FN
 
@@ -287,22 +287,27 @@ class RoPEModelSkippableLayer(SkippableLayerBase):
         value_states = layer_attn.v_proj(hidden_states)
         return query_states, key_states, value_states
 
-    def recompute_cache(self, layer_attn, hidden_states, past_key_value, cache_position, position_ids):
-        # =====================================================
-        # Copied from transformers/models/llama/modeling_llama.py with slight modifications 
-        bsz, q_len, _ = hidden_states.size()
+    def apply_rotary_emb(self, layer_attn, q, k, v, cache_position, position_ids, past_key_value):
+        cos, sin = layer_attn.rotary_emb(v, position_ids)
+        query_states, key_states = apply_llama_rotary_pos_emb(query_states, key_states, cos, sin)
 
+        # sin and cos are specific to RoPE models; cache_position needed for the static cache
+        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+        return cache_kwargs, q, k
+
+    def recompute_cache(self, layer_attn, hidden_states, past_key_value, cache_position, position_ids):
+        bsz, q_len, _ = hidden_states.size()
         query_states, key_states, value_states = self.eval_qkvproj(layer_attn, hidden_states)
 
         query_states = query_states.view(bsz, q_len, layer_attn.num_heads, layer_attn.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, layer_attn.num_key_value_heads, layer_attn.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, layer_attn.num_key_value_heads, layer_attn.head_dim).transpose(1, 2)
 
-        cos, sin = layer_attn.rotary_emb(value_states, position_ids)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-
-        # sin and cos are specific to RoPE models; cache_position needed for the static cache
-        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+        cache_kwargs, query_states, key_states = self.apply_rotary_emb(
+            layer_attn,
+            query_states, key_states, value_states,
+            cache_position, position_ids, past_key_value
+        )
         key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
         return past_key_value
 
@@ -319,6 +324,15 @@ class RoPEModelSkippableLayer(SkippableLayerBase):
             outputs += (past_key_value,)
         
         return outputs
+
+class QwenSkippableLayer(SkippableLayerBase):
+    def apply_rotary_emb(self, layer_attn, q, k, v, cache_position, position_ids, past_key_value):
+        from transformers.models.qwen2.modeling_qwen2 import apply_rotary_pos_emb 
+
+        kv_seq_len = k.shape[-2]
+        kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+        cos, sin = self.rotary_emb(v, seq_len=kv_seq_len)
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids) 
 
 class LlamaSkippableLayer(RoPEModelSkippableLayer):
     def eval_qkvproj(self, layer_attn, hidden_states):
@@ -504,7 +518,9 @@ def load_assistant(assistant_config: AssistanceConfig, model: ModelType, model_b
         elif 'opt' in model_basename:
             assert not assistant_is_granular
             new_layers.append(OPTSkippableLayer(layer, idx, events))
-        elif 'gemma' in model_basename or 'qwen2' in model_basename:
+        elif 'qwen2' in model_basename:
+            cls = QwenSkippableLayer(layer, idx, events)
+        elif 'gemma' in model_basename: 
             cls = RoPEModelSkippableLayerGranular if assistant_is_granular else RoPEModelSkippableLayer
             new_layers.append(cls(layer, idx, events))
         else:
