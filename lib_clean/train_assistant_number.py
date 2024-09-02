@@ -42,6 +42,54 @@ class AssistantConfig:
     eval_steps: int = 10
     save_steps: Optional[int] = None 
 
+class MetricTracker:
+    def __init__(self, criterion):
+        self.criterion = criterion
+        self.reset()
+
+    def reset(self):
+        self.predicted_indices = [] 
+        self.best_indices = []
+        self.loss_sum = 0
+        self.running_batches = 0
+
+    def update(self, y_pred, y_true):
+        assert y_pred.shape == y_true.shape 
+
+        loss = criterion(y_pred, y_true) 
+        self.loss_sum += loss.item()
+        self.running_batches += 1
+
+        predicted_indices = y_pred.argmax(dim=-1)
+        self.predicted_indices += predicted_indices.tolist()
+        self.best_indices += y_true.argmax(dim=-1).tolist()
+
+        return loss
+
+    def get_metrics(self):
+        predicted_tensor = torch.tensor(self.predicted_indices)
+        best_tensor = torch.tensor(self.best_indices)
+
+        correct_predictions = predicted_tensor == best_tensor
+        accuracy = correct_predictions.float().mean().item()
+
+        distances = torch.abs(predicted_tensor - best_tensor)
+        average_distance = distances.float().mean().item()
+
+        non_zero_mask = predicted_tensor != 0
+        if non_zero_mask.sum() > 0:  
+            non_zero_correct_predictions = correct_predictions[non_zero_mask]
+            accuracy_non_zero = non_zero_correct_predictions.float().mean().item()
+        else:
+            accuracy_non_zero = 0 
+
+        return {
+            'loss': self.loss_sum / self.running_batches,
+            'accuracy': accuracy,
+            'average_distance': average_distance,
+            'non_zero_accuracy': accuracy_non_zero
+        }
+
 @torch.no_grad()
 def get_targets(model, input_ids, orig_logits, pruning_order, attention_mask):
     """
@@ -51,9 +99,9 @@ def get_targets(model, input_ids, orig_logits, pruning_order, attention_mask):
     num_layers = len(orig_layers)
     bsz, seqlen, _ = orig_logits.shape
     pruned_layers = []
-    num_layers_pruned_per_token = torch.zeros((bsz, seqlen), dtype=torch.long, device=input_ids.device)
+    num_layers_pruned_per_token = (n_blocks - 1) * torch.ones((bsz, seqlen), device=input_ids.device)
     checked = torch.zeros((bsz, seqlen), dtype=torch.bool, device=input_ids.device)
-    num_checked = attention_mask.sum(dim=1)
+    num_checked = (attention_mask == 0).sum(dim=1)
 
     for layer_idx in pruning_order:
         pruned_layers.append(layer_idx)
@@ -71,6 +119,7 @@ def get_targets(model, input_ids, orig_logits, pruning_order, attention_mask):
                     continue  
                     
                 if new_logits[batch_idx, token_idx].argmax() != orig_logits[batch_idx, token_idx].argmax():
+                    # print(batch_idx, token_idx, len(pruned_layers))
                     checked[batch_idx, token_idx] = True
                     num_layers_pruned_per_token[batch_idx, token_idx] = len(pruned_layers) - 1
                     num_checked[batch_idx] += 1
@@ -79,7 +128,7 @@ def get_targets(model, input_ids, orig_logits, pruning_order, attention_mask):
             break
 
     set_decoder_layers(model, orig_layers)
-    return num_layers_pruned_per_token  
+    return num_layers_pruned_per_token.long()
 
 config, objective_config = HfArgumentParser((AssistantConfig, TrainingObjective)).parse_args_into_dataclasses()
 wandb.init(project='UCL thesis', name=config.run_name)
@@ -117,13 +166,13 @@ def generate_synthetic_data(teacher_model, pruning_order, batch):
     return select(emb, att_mask), select(targets, att_mask) 
 
 @torch.no_grad()
-def estimate_angular_distances(model, dataloader, num_layers, device, num_samples=500):
+def estimate_angular_distances(model, dataloader, device, num_samples=500):
     def compute_angular_distance(state1, state2):
         cosine_similarity = F.cosine_similarity(state1, state2, dim=-1, eps=1e-6)
         angular_distance = 1 - cosine_similarity
-        return angular_distance.mean(dim=0)  # Mean distance over all tokens
+        return angular_distance.mean(dim=0) 
 
-    angular_distances = [[] for _ in range(num_layers - 1)]  # List to store distances for each layer
+    angular_distances = [[] for _ in range(n_blocks)]  
 
     for idx, batch in enumerate(dataloader):
         if idx >= num_samples:
@@ -135,13 +184,32 @@ def estimate_angular_distances(model, dataloader, num_layers, device, num_sample
         outputs = model(input_ids, use_cache=False, past_key_values=None, output_hidden_states=True)
         hidden_states = outputs.hidden_states  
 
-        for i in range(num_layers - 1):
+        for i in range(n_blocks):
             dist = compute_angular_distance(hidden_states[i], hidden_states[i + 1])
             angular_distances[i].append(dist.cpu())  
+
+
+    layer_min_count = torch.zeros(n_blocks, dtype=torch.int64)
+
+    for token_idx in range(input_ids.size(1)):  # Iterate over each token
+        min_distances = []  # Store the minimum distance per token across layers
+
+        for layer_idx in range(n_blocks):
+            concatenated_distances = torch.cat([d[:, token_idx] for d in angular_distances[layer_idx]], dim=0)  
+            min_distances.append(concatenated_distances)
+
+        stacked_distances = torch.stack(min_distances)  
+        min_indices = torch.argmin(stacked_distances, dim=0)  # Find the index of the minimum distance for each token
+
+        for min_index in min_indices:
+            layer_min_count[min_index] += 1
+
+    return layer_min_count
 
     median_angular_distances = []
     for layer_distances in angular_distances:
         concatenated_distances = torch.cat(layer_distances, dim=0)  
+        # TODO: Is median the best?
         median_distance = torch.median(concatenated_distances, dim=0).values
         median_angular_distances.append(median_distance)
 
@@ -219,7 +287,7 @@ print(f'{lr=}')
 cfg = GPTConfig(n_layer=config.n_layer, n_head=config.n_head, n_embd=config.n_embd, bias=False, dropout=dropout)
 print('Assistant config:')
 print(cfg)
-model = GPT2ForLayerPruning(cfg, teacher_model.config.hidden_size, teacher_model.config.num_hidden_layers - 1).cuda()
+model = GPT2ForLayerPruning(cfg, teacher_model.config.hidden_size, teacher_model.config.num_hidden_layers).cuda()
 optim = model.configure_optimizers(weight_decay, lr, 'cuda')
 criterion = nn.CrossEntropyLoss()
 
@@ -228,17 +296,15 @@ from tqdm import tqdm
 @torch.no_grad()
 def compute_val_metrics(teacher_model, pruning_order, test_loader, criterion):
     model.eval()
-    loss_sum = 0
-    loss_cnt = 0
+    tracker = MetricTracker(criterion)
     for batch in test_loader:
         X_lst, y_lst = generate_synthetic_data(teacher_model, pruning_order, batch)
         for X, y in zip(X_lst, y_lst):
             X = X.unsqueeze(0)
             preds = model(X, training=True).squeeze()
-            loss_sum += criterion(preds, y).item()
-            loss_cnt += 1
+            tracker.update(preds, y)
     
-    return loss_sum / loss_cnt
+    return tracker.get_metrics() 
 
 model.train()
 total_num_tokens = 0
@@ -247,7 +313,6 @@ optim.zero_grad()
 pruning_order = estimate_angular_distances(
     teacher_model, 
     train_loader,
-    n_blocks, 
     'cuda', 
     num_samples=objective_config.weight_estimation_steps
 ).argsort()
@@ -275,14 +340,15 @@ def dump_assistant(path: Path):
             'output_size': n_blocks 
         }, cfg_file)
 
-loss_sum = 0
+train_tracker = MetricTracker(criterion)
 for step_idx, batch in enumerate(tqdm(train_loader)):
     X_lst, y_lst = batch 
     total_loss = 0
     for X, y in zip(X_lst, y_lst):
         preds = model(X.unsqueeze(0), training=True).squeeze()
+        predicted_index = y.argmax()
         num_tokens = y.size(0)
-        loss = criterion(preds, y) 
+        loss = train_tracker.update(preds, y) 
         total_num_tokens += num_tokens
         loss.backward()
         total_loss += loss.item()
@@ -307,20 +373,19 @@ for step_idx, batch in enumerate(tqdm(train_loader)):
     optim.step()
     optim.zero_grad()
 
-    loss_sum += total_loss
-
     if (step_idx + 1) % save_steps == 0:
         checkpoint = checkpoints_root.joinpath(f'checkpoint-{step_idx + 1}')
         tqdm.write(f'Saving {checkpoint.as_posix()}')
         dump_assistant(checkpoint)
 
     if (step_idx + 1) % config.eval_steps == 0:
-        wandb.log({
-            'train_loss': loss_sum / (config.eval_steps * config.batch_size),
-            'val_loss': compute_val_metrics(teacher_model, pruning_order, test_loader, criterion) 
-        })
+        val_metrics = compute_val_metrics(teacher_model, pruning_order, test_loader, criterion)
+        val_metrics = {f'val_{key}': value for key, value in val_metrics.items()} 
+        train_metrics = {f'train_{key}': value for key, value in train_tracker.get_metrics().items()}
+        wandb.log(train_metrics | val_metrics)
+        print(train_metrics | val_metrics)
+        train_tracker.reset()
         model.train()
-        loss_sum = 0
 
 wandb.finish()
 
