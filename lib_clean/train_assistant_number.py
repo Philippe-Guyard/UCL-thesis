@@ -87,6 +87,7 @@ teacher_model, teacher_tokenizer = get_model(config.teacher_model)
 # Needed to avoid warnings from qwen2
 teacher_model.generation_config.pad_token_id = teacher_tokenizer.eos_token_id
 teacher_tokenizer.padding_side = 'left'
+teacher_tokenizer.pad_token = teacher_tokenizer.eos_token
 n_blocks = len(get_decoder_layers(teacher_model))
 teacher_model = teacher_model.cuda()
 teacher_model.eval()
@@ -314,10 +315,10 @@ for step_idx, batch in enumerate(tqdm(train_loader)):
         dump_assistant(checkpoint)
 
     if (step_idx + 1) % config.eval_steps == 0:
-        # wandb.log({
-        #     'train_loss': loss_sum / (config.eval_steps * config.batch_size),
-        #     'val_loss': compute_val_metrics(teacher_model, pruning_order, test_loader, criterion) 
-        # })
+        wandb.log({
+            'train_loss': loss_sum / (config.eval_steps * config.batch_size),
+            'val_loss': compute_val_metrics(teacher_model, pruning_order, test_loader, criterion) 
+        })
         model.train()
         loss_sum = 0
 
