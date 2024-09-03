@@ -131,7 +131,7 @@ def get_targets(model, input_ids, orig_logits, pruning_order, attention_mask):
     return num_layers_pruned_per_token.long()
 
 config, objective_config = HfArgumentParser((AssistantConfig, TrainingObjective)).parse_args_into_dataclasses()
-wandb.init(project='UCL thesis', name=config.run_name)
+wandb.init(project='thesis-assistants', name=config.run_name)
 teacher_model, teacher_tokenizer = get_model(config.teacher_model)
 # Needed to avoid warnings from qwen2
 teacher_model.generation_config.pad_token_id = teacher_tokenizer.eos_token_id
@@ -187,24 +187,6 @@ def estimate_angular_distances(model, dataloader, device, num_samples=500):
         for i in range(n_blocks):
             dist = compute_angular_distance(hidden_states[i], hidden_states[i + 1])
             angular_distances[i].append(dist.cpu())  
-
-
-    layer_min_count = torch.zeros(n_blocks, dtype=torch.int64)
-
-    for token_idx in range(input_ids.size(1)):  # Iterate over each token
-        min_distances = []  # Store the minimum distance per token across layers
-
-        for layer_idx in range(n_blocks):
-            concatenated_distances = torch.cat([d[:, token_idx] for d in angular_distances[layer_idx]], dim=0)  
-            min_distances.append(concatenated_distances)
-
-        stacked_distances = torch.stack(min_distances)  
-        min_indices = torch.argmin(stacked_distances, dim=0)  # Find the index of the minimum distance for each token
-
-        for min_index in min_indices:
-            layer_min_count[min_index] += 1
-
-    return layer_min_count
 
     median_angular_distances = []
     for layer_distances in angular_distances:
