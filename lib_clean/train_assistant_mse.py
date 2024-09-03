@@ -60,9 +60,8 @@ class MetricTracker:
         self.loss_sum += loss.item()
         self.running_batches += 1
 
-        predicted_indices = y_pred.argmax(dim=-1)
-        self.predicted_indices += predicted_indices.tolist()
-        self.best_indices += y_true.argmax(dim=-1).tolist()
+        self.predicted_indices += y_pred.round().tolist()
+        self.best_indices += y_true.tolist()
 
         return loss
 
@@ -99,15 +98,17 @@ def get_targets(model, input_ids, orig_logits, pruning_order, attention_mask):
     """
     Iteratively prune layers in the order of increasing angular distance and check if the prediction changes per token.
     """
+    MAX_TO_PRUNE = (n_blocks + 1) // 2
     orig_layers = get_decoder_layers(model) 
     num_layers = len(orig_layers)
     bsz, seqlen, _ = orig_logits.shape
     pruned_layers = []
-    num_layers_pruned_per_token = (n_blocks - 1) * torch.ones((bsz, seqlen), device=input_ids.device)
+    # num_layers_pruned_per_token = (n_blocks - 1) * torch.ones((bsz, seqlen), device=input_ids.device)
+    num_layers_pruned_per_token = MAX_TO_PRUNE * torch.ones((bsz, seqlen), device=input_ids.device)
     checked = torch.zeros((bsz, seqlen), dtype=torch.bool, device=input_ids.device)
     num_checked = (attention_mask == 0).sum(dim=1)
 
-    for layer_idx in pruning_order:
+    for layer_idx in pruning_order[:MAX_TO_PRUNE]:
         pruned_layers.append(layer_idx)
         new_layers = nn.ModuleList([orig_layers[i] for i in range(num_layers) if i not in pruned_layers])
         set_decoder_layers(model, new_layers)  
@@ -132,7 +133,7 @@ def get_targets(model, input_ids, orig_logits, pruning_order, attention_mask):
             break
 
     set_decoder_layers(model, orig_layers)
-    return num_layers_pruned_per_token.long()
+    return num_layers_pruned_per_token
 
 config, objective_config = HfArgumentParser((AssistantConfig, TrainingObjective)).parse_args_into_dataclasses()
 wandb.init(project='thesis-assistants', name=config.run_name)
@@ -166,7 +167,6 @@ def generate_synthetic_data(teacher_model, pruning_order, batch):
     targets = get_targets(teacher_model, inps, logits, pruning_order, att_mask) 
     att_mask = att_mask.bool()
     emb = teacher_model.get_input_embeddings()(inps)
-    targets = F.one_hot(targets, num_classes=len(pruning_order)).float()
     return select(emb, att_mask), select(targets, att_mask) 
 
 @torch.no_grad()
@@ -273,9 +273,9 @@ print(f'{lr=}')
 cfg = GPTConfig(n_layer=config.n_layer, n_head=config.n_head, n_embd=config.n_embd, bias=False, dropout=dropout)
 print('Assistant config:')
 print(cfg)
-model = GPT2ForLayerPruning(cfg, teacher_model.config.hidden_size, teacher_model.config.num_hidden_layers).cuda()
+model = GPT2ForLayerPruning(cfg, teacher_model.config.hidden_size, 1).cuda()
 optim = model.configure_optimizers(weight_decay, lr, 'cuda')
-criterion = nn.CrossEntropyLoss()
+criterion = nn.MSELoss()
 
 from tqdm import tqdm
 
